@@ -27,6 +27,7 @@ enum opt {
 	OPT_CROP_LEFT,
 	OPT_CROP_RIGHT,
 	OPT_CROP_TOP,
+	OPT_SOFTEN,
 };
 
 const struct option long_options[] = {
@@ -37,6 +38,7 @@ const struct option long_options[] = {
 	{"add",         required_argument, 0, 'a'              },
 	{"mul",         required_argument, 0, 'm'              },
 	{"gamma",       required_argument, 0, 'g'              },
+	{"soften",      required_argument, 0, OPT_SOFTEN       },
 	{"crop-bottom", required_argument, 0, OPT_CROP_BOTTOM  },
 	{"crop-left",   required_argument, 0, OPT_CROP_LEFT    },
 	{"crop-right",  required_argument, 0, OPT_CROP_RIGHT   },
@@ -50,6 +52,7 @@ enum xfrm_op {
 	XFRM_ADD,
 	XFRM_MUL,
 	XFRM_GAM,
+	XFRM_SOFTEN,
 };
 
 struct xfrm {
@@ -85,6 +88,7 @@ void usage(int code, const char *cmd)
 	    "  -a --add <value>             add <value> [-1..1] to the intensity\n"
 	    "  -g --gamma <value>           apply gamma value <value>\n"
 	    "  -m --mul <value>             multiply intensity by <value>\n"
+	    "     --soften <value>          subtract neighbors' average times <value>\n"
 	    "", cmd);
 }
 
@@ -318,8 +322,35 @@ struct xfrm *xfrm_new(struct xfrm *curr, enum xfrm_op op, float arg)
 int xfrm_apply(struct image *img, struct xfrm *xfrm)
 {
 	uint32_t x, y;
+	float *soften = NULL;
 
 	while (xfrm) {
+		if (xfrm->op == XFRM_SOFTEN) {
+			uint32_t px, py;
+			soften = malloc(img->h * img->w * sizeof(*soften));
+			if (!soften)
+				return 0;
+
+			for (y = 0; y < img->h; y++) {
+				for (x = 0; x < img->w; x++) {
+					float v = 0.0;
+
+					for (py = y - 1; py != y + 2; py++) {
+						for (px = x - 1; px != x + 2; px++) {
+							/* clip to image border and don't count current point */
+							if (py >= img->h ||
+							    px >= img->w ||
+							    (px == x && py == y))
+								continue;
+
+							v += img->work[py * img->w + px];
+						}
+					}
+					soften[y * img->w + x] = v / 8.0;
+				}
+			}
+		}
+
 		for (y = 0; y < img->h; y++) {
 			for (x = 0; x < img->w; x++) {
 				uint32_t p = y * img->w + x;
@@ -338,6 +369,10 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 					v = exp(log(v + 1.0) / xfrm->arg) / exp(log(2.0) / xfrm->arg);
 					break;
 
+				case XFRM_SOFTEN:
+					v -= soften[p] * xfrm->arg;
+					break;
+
 				default:
 					break;
 				}
@@ -350,6 +385,12 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 				img->work[p] = v;
 			}
 		}
+
+		if (xfrm->op == XFRM_SOFTEN) {
+			free(soften);
+			soften = NULL;
+		}
+
 		xfrm = xfrm->next;
 	}
 	return 1;
@@ -390,6 +431,14 @@ int main(int argc, char **argv)
 
 		case OPT_CROP_TOP:
 			cropy1 = atoi(optarg);
+			break;
+
+		case OPT_SOFTEN:
+			curr = xfrm_new(curr, XFRM_SOFTEN, atof(optarg));
+			if (!curr)
+				die(1, "failed to allocate a new transformation\n", optarg);
+			if (!xfrm)
+				xfrm = curr;
 			break;
 
 		case 'a':
