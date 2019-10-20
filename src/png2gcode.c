@@ -1,0 +1,265 @@
+/* Uses the simplified API, thus requires libpng 1.6 or above */
+#include <ctype.h>
+#include <math.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <png.h>
+
+struct image {
+	uint32_t w;    // width in pixels
+	uint32_t h;    // height in pixels
+	uint8_t *rgba; // RGBA buffer
+	uint8_t *gray; // grayscale buffer
+	float *work;   // work area: 0.0 = white, 1.0+ = black
+};
+
+
+/* display the message and exit with the code */
+__attribute__((noreturn)) void die(int code, const char *format, ...)
+{
+	va_list args;
+
+	va_start(args, format);
+	vfprintf(stderr, format, args);
+	va_end(args);
+	exit(code);
+}
+
+/* reads file <file> into rgba image <img>, which will be initialized. The image
+ * will go from bottom to top to accommodate from GCODE's image directions, but
+ * this can be changed by setting the row_stride argument to 1 instead of -1.
+ * Returns non-zero on sucess, or 0 on failure, in which case the contents of
+ * <img> remains undefined.
+ */
+int read_rgba_file(const char *file, struct image *img)
+{
+	const int row_stride = -1; // bottom to top
+	png_image png_image;
+
+	memset(img, 0, sizeof(*img));
+	memset(&png_image, 0, sizeof(png_image));
+
+	png_image.version = PNG_IMAGE_VERSION;
+	if (!png_image_begin_read_from_file(&png_image, file))
+		goto fail;
+
+	/* process all images as RGBA so that we can turn transparent into white*/
+	png_image.format  = PNG_FORMAT_RGBA;
+
+	img->w = png_image.width;
+	img->h = png_image.height;
+	img->rgba = malloc(PNG_IMAGE_SIZE(png_image));
+	if (!img->rgba)
+		goto fail;
+
+	if (!png_image_finish_read(&png_image, NULL, img->rgba, row_stride * PNG_IMAGE_ROW_STRIDE(png_image), NULL))
+		goto fail;
+
+	return 1;
+
+ fail:
+	free(img->rgba);
+	return 0;
+}
+
+/* free all buffers in image <img> */
+void free_image(struct image *img)
+{
+	free(img->rgba);
+	free(img->gray);
+	free(img->work);
+	memset(img, 0, sizeof(*img));
+}
+
+/* write the gray buffer from <img> into file <file>, or to stdout if <file> is
+ * NULL. The image will go from bottom to top to accommodate from GCODE's image
+ * directions, but this can be changed by setting the row_stride argument to 1
+ * instead of -1. Returns non-zero on success, otherwise zero.
+ */
+int write_gray_file(const char *file, struct image *img)
+{
+	const int row_stride = -1; // bottom to top
+	png_image png_image;
+	int ret;
+
+	memset(&png_image, 0, sizeof(png_image));
+	png_image.version = PNG_IMAGE_VERSION;
+	png_image.width   = img->w;
+	png_image.height  = img->h;
+	png_image.format  = PNG_FORMAT_GRAY;
+
+	if (file)
+		ret = png_image_write_to_file(&png_image, file, 0, img->gray, row_stride * PNG_IMAGE_ROW_STRIDE(png_image), NULL);
+	else
+		ret = png_image_write_to_stdio(&png_image, stdout, 0, img->gray, row_stride * PNG_IMAGE_ROW_STRIDE(png_image), NULL);
+	return ret;
+}
+
+/* convert image <img> from rgba to gray. Transparent is turned to white. The
+ * gray buffer will be allocated and the rgba buffer will be freed. Non-zero is
+ * returned on success, zero on error.
+ */
+int rgba_to_gray(struct image *img)
+{
+	uint32_t x, y;
+
+	if (!img->rgba)
+		return 0;
+
+	img->gray = malloc(img->w * img->h * sizeof(*img->gray));
+	if (!img->gray)
+		return 0;
+
+	for (y = 0; y < img->h; y++) {
+		for (x = 0; x < img->w; x++) {
+			uint32_t v, p;
+			uint8_t r, g, b, a;
+
+			p = (y * img->w + x) * 4;
+			r = img->rgba[p + 0];
+			g = img->rgba[p + 1];
+			b = img->rgba[p + 2];
+			a = img->rgba[p + 3];
+			v = a * (r + g + b) + (255 - a) * (3 * 255);
+			v /= 3 * 255;
+			img->gray[y * img->w + x] = v;
+		}
+	}
+
+	free(img->rgba);
+	img->rgba = NULL;
+	return 1;
+}
+
+/* convert image <img> from gray to work. White is turned to strength 0.0, and
+ * black is turned to strength 1.0. The work buffer will be allocated and the
+ * gray buffer will be freed. Non-zero is returned on success, zero on error.
+ */
+int gray_to_work(struct image *img)
+{
+	uint32_t x, y;
+
+	if (!img->gray)
+		return 0;
+
+	img->work = malloc(img->w * img->h * sizeof(*img->work));
+	if (!img->work)
+		return 0;
+
+	for (y = 0; y < img->h; y++) {
+		for (x = 0; x < img->w; x++) {
+			uint32_t p = y * img->w + x;
+
+			img->work[p] = (255 - img->gray[p]) / 255.0;
+		}
+	}
+
+	free(img->gray);
+	img->gray = NULL;
+	return 1;
+}
+
+/* convert image <img> from work to gray. Signal strengths 0.0 and lower are
+ * turned to white, and strengths 1.0 and higher are turned to black. The gray
+ * buffer will be allocated and the work buffer will be freed. Non-zero is
+ * returned on success, zero on error.
+ */
+int work_to_gray(struct image *img)
+{
+	uint32_t x, y;
+
+	if (!img->work)
+		return 0;
+
+	img->gray = malloc(img->w * img->h * sizeof(*img->gray));
+	if (!img->gray)
+		return 0;
+
+	for (y = 0; y < img->h; y++) {
+		for (x = 0; x < img->w; x++) {
+			uint32_t p = y * img->w + x;
+			float    v = img->work[p];
+
+			v = 255 * (1.0 - v);
+			if (v < 0)
+				v = 0;
+			else if (v > 255.0)
+				v = 255.0;
+			img->gray[p] = (uint8_t)v;
+		}
+	}
+
+	free(img->work);
+	img->work = NULL;
+	return 1;
+}
+
+/* crop a gray image <img>, to keep only (<x0>,<y0)-(<x1>,<y1>), all included.
+ * First columns and rows are numbered zero. Returns non-zero on success, 0 on
+ * failure. x0, x1, y0, y1 must be within the original buffer dimensions, with
+ * x0<=x1, y0<=y1. The image's w and h are updated. The buffer is rearranged
+ * but the extra size is not released.
+ */
+int crop_gray_image(struct image *img, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1)
+{
+	int row_pre, row_post;
+	uint8_t *src, *dst;
+	uint32_t x, y;
+
+	if (x0 >= img->w || x1 >= img->w || x0 > x1)
+		return 0;
+
+	if (y0 >= img->h || y1 >= img->h || y0 > y1)
+		return 0;
+
+	if (!img->gray)
+		return 0;
+
+	row_pre = x0;
+	row_post = img->w - 1 - x1;
+
+	src = dst = img->gray;
+	src += y0 * img->w;
+	for (y = y0; y <= y1; y++) {
+		src += row_pre;
+		for (x = x0; x <= x1; x++)
+			*dst++ = *src++;
+		src += row_post;
+	}
+
+	img->w = x1 - x0 + 1;
+	img->h = y1 - y0 + 1;
+	return 1;
+}
+
+int main(int argc, char **argv)
+{
+	struct image img;
+
+	if (argc < 3)
+		die(1, "missing argument\n");
+
+	if (!read_rgba_file(argv[1], &img))
+		die(2, "failed to read file %s\n", argv[1]);
+
+	if (!rgba_to_gray(&img))
+		die(3, "failed to convert image to gray\n");
+
+	if (!gray_to_work(&img))
+		die(3, "failed to convert image to work\n");
+
+	if (!work_to_gray(&img))
+		die(3, "failed to convert image to gray\n");
+
+	//if (!crop_gray_image(&img, 20, 20, img.w - 21, img.h - 21))
+	//	die(4, "failed to crop image\n");
+
+	if (!write_gray_file(argv[2], &img))
+		die(5, "failed to write file %s\n", argv[2]);
+
+	free_image(&img);
+	return 0;
+}
