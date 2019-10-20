@@ -34,11 +34,28 @@ const struct option long_options[] = {
 	{"in",          required_argument, 0, 'i'              },
 	{"out",         required_argument, 0, 'o'              },
 	{"fmt",         required_argument, 0, 'f'              },
+	{"add",         required_argument, 0, 'a'              },
+	{"mul",         required_argument, 0, 'm'              },
+	{"gamma",       required_argument, 0, 'g'              },
 	{"crop-bottom", required_argument, 0, OPT_CROP_BOTTOM  },
 	{"crop-left",   required_argument, 0, OPT_CROP_LEFT    },
 	{"crop-right",  required_argument, 0, OPT_CROP_RIGHT   },
 	{"crop-top",    required_argument, 0, OPT_CROP_TOP     },
 	{0,             0,                 0, 0                }
+};
+
+/* describe one transformation to apply to the image */
+enum xfrm_op {
+	XFRM_NOP = 0,
+	XFRM_ADD,
+	XFRM_MUL,
+	XFRM_GAM,
+};
+
+struct xfrm {
+	enum xfrm_op op;
+	float arg;
+	struct xfrm *next;
 };
 
 /* display the message and exit with the code */
@@ -55,7 +72,7 @@ __attribute__((noreturn)) void die(int code, const char *format, ...)
 void usage(int code, const char *cmd)
 {
 	die(code,
-	    "Usage: %s [options]*\n"
+	    "Usage: %s [options]* [transformations]*\n"
 	    "  -h --help                    show this help\n"
 	    "  -f --fmt <format>            output format (png)\n"
 	    "  -i --in <file>               input PNG file name\n"
@@ -64,6 +81,10 @@ void usage(int code, const char *cmd)
 	    "     --crop-left   <size>      crop this number of pixels from the left\n"
 	    "     --crop-right  <size>      crop this number of pixels from the right\n"
 	    "     --crop-top    <size>      crop this number of pixels from the top\n"
+	    "Transformations are series of operations applied to the work area:\n"
+	    "  -a --add <value>             add <value> [-1..1] to the intensity\n"
+	    "  -g --gamma <value>           apply gamma value <value>\n"
+	    "  -m --mul <value>             multiply intensity by <value>\n"
 	    "", cmd);
 }
 
@@ -274,17 +295,79 @@ int crop_gray_image(struct image *img, uint32_t x0, uint32_t y0, uint32_t x1, ui
 	return 1;
 }
 
+/* append a transformation to list <curr> */
+struct xfrm *xfrm_new(struct xfrm *curr, enum xfrm_op op, float arg)
+{
+	struct xfrm *new;
+
+	new = malloc(sizeof(*new));
+	if (!new)
+		return NULL;
+
+	new->op    = op;
+	new->arg   = arg;
+	new->next  = NULL;
+	if (curr)
+		curr->next = new;
+	return new;
+}
+
+/* apply transformations starting at <xfrm> to image <img>. Return non-zero on
+ * success, zero on failure.
+ */
+int xfrm_apply(struct image *img, struct xfrm *xfrm)
+{
+	uint32_t x, y;
+
+	while (xfrm) {
+		for (y = 0; y < img->h; y++) {
+			for (x = 0; x < img->w; x++) {
+				uint32_t p = y * img->w + x;
+				float    v = img->work[p];
+
+				switch (xfrm->op) {
+				case XFRM_ADD:
+					v += xfrm->arg;
+					break;
+
+				case XFRM_MUL:
+					v *= xfrm->arg;
+					break;
+
+				case XFRM_GAM:
+					v = exp(log(v + 1.0) / xfrm->arg) / exp(log(2.0) / xfrm->arg);
+					break;
+
+				default:
+					break;
+				}
+
+				if (v < 0.0)
+					v = 0.0;
+				else if (v > 1.0)
+					v = 1.0;
+
+				img->work[p] = v;
+			}
+		}
+		xfrm = xfrm->next;
+	}
+	return 1;
+}
+
 int main(int argc, char **argv)
 {
 	int cropx0 = 0, cropy0 = 0, cropx1 = 0, cropy1 = 0;
 	enum out_fmt fmt = OUT_FMT_NONE;
+	struct xfrm *curr = NULL;
+	struct xfrm *xfrm = NULL;
 	const char  *in  = NULL;
 	const char  *out = NULL;
 	struct image img;
 
 	while (1) {
 		int option_index = 0;
-		int c = getopt_long(argc, argv, "hi:o:f:", long_options, &option_index);
+		int c = getopt_long(argc, argv, "hi:o:f:a:g:m:", long_options, &option_index);
 
 		if (c == -1)
 			break;
@@ -307,6 +390,30 @@ int main(int argc, char **argv)
 
 		case OPT_CROP_TOP:
 			cropy1 = atoi(optarg);
+			break;
+
+		case 'a':
+			curr = xfrm_new(curr, XFRM_ADD, atof(optarg));
+			if (!curr)
+				die(1, "failed to allocate a new transformation\n", optarg);
+			if (!xfrm)
+				xfrm = curr;
+			break;
+
+		case 'g':
+			curr = xfrm_new(curr, XFRM_GAM, atof(optarg));
+			if (!curr)
+				die(1, "failed to allocate a new transformation\n", optarg);
+			if (!xfrm)
+				xfrm = curr;
+			break;
+
+		case 'm':
+			curr = xfrm_new(curr, XFRM_MUL, atof(optarg));
+			if (!curr)
+				die(1, "failed to allocate a new transformation\n", optarg);
+			if (!xfrm)
+				xfrm = curr;
 			break;
 
 		case 'h':
@@ -354,6 +461,9 @@ int main(int argc, char **argv)
 
 	if (!gray_to_work(&img))
 		die(3, "failed to convert image to work\n");
+
+	if (xfrm && !xfrm_apply(&img, xfrm))
+		die(6, "failed to apply one transformation to the image\n");
 
 	if (fmt == OUT_FMT_PNG) {
 		if (!work_to_gray(&img))
