@@ -1,5 +1,6 @@
 /* Uses the simplified API, thus requires libpng 1.6 or above */
 #include <ctype.h>
+#include <getopt.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -16,6 +17,29 @@ struct image {
 	float *work;   // work area: 0.0 = white, 1.0+ = black
 };
 
+enum out_fmt {
+	OUT_FMT_NONE = 0,
+	OUT_FMT_PNG,
+};
+
+enum opt {
+	OPT_CROP_BOTTOM = 256,
+	OPT_CROP_LEFT,
+	OPT_CROP_RIGHT,
+	OPT_CROP_TOP,
+};
+
+const struct option long_options[] = {
+	{"help",        no_argument,       0, 'h'              },
+	{"in",          required_argument, 0, 'i'              },
+	{"out",         required_argument, 0, 'o'              },
+	{"fmt",         required_argument, 0, 'f'              },
+	{"crop-bottom", required_argument, 0, OPT_CROP_BOTTOM  },
+	{"crop-left",   required_argument, 0, OPT_CROP_LEFT    },
+	{"crop-right",  required_argument, 0, OPT_CROP_RIGHT   },
+	{"crop-top",    required_argument, 0, OPT_CROP_TOP     },
+	{0,             0,                 0, 0                }
+};
 
 /* display the message and exit with the code */
 __attribute__((noreturn)) void die(int code, const char *format, ...)
@@ -26,6 +50,21 @@ __attribute__((noreturn)) void die(int code, const char *format, ...)
 	vfprintf(stderr, format, args);
 	va_end(args);
 	exit(code);
+}
+
+void usage(int code, const char *cmd)
+{
+	die(code,
+	    "Usage: %s [options]*\n"
+	    "  -h --help                    show this help\n"
+	    "  -f --fmt <format>            output format (png)\n"
+	    "  -i --in <file>               input PNG file name\n"
+	    "  -o --out <file>              output file name\n"
+	    "     --crop-bottom <size>      crop this number of pixels from the bottom\n"
+	    "     --crop-left   <size>      crop this number of pixels from the left\n"
+	    "     --crop-right  <size>      crop this number of pixels from the right\n"
+	    "     --crop-top    <size>      crop this number of pixels from the top\n"
+	    "", cmd);
 }
 
 /* reads file <file> into rgba image <img>, which will be initialized. The image
@@ -237,28 +276,92 @@ int crop_gray_image(struct image *img, uint32_t x0, uint32_t y0, uint32_t x1, ui
 
 int main(int argc, char **argv)
 {
+	int cropx0 = 0, cropy0 = 0, cropx1 = 0, cropy1 = 0;
+	enum out_fmt fmt = OUT_FMT_NONE;
+	const char  *in  = NULL;
+	const char  *out = NULL;
 	struct image img;
 
-	if (argc < 3)
-		die(1, "missing argument\n");
+	while (1) {
+		int option_index = 0;
+		int c = getopt_long(argc, argv, "hi:o:f:", long_options, &option_index);
 
-	if (!read_rgba_file(argv[1], &img))
-		die(2, "failed to read file %s\n", argv[1]);
+		if (c == -1)
+			break;
+
+		switch (c) {
+		case 0: /* long option: long_options[option_index] with arg <optarg> */
+			break;
+
+		case OPT_CROP_BOTTOM:
+			cropy0 = atoi(optarg);
+			break;
+
+		case OPT_CROP_LEFT:
+			cropx0 = atoi(optarg);
+			break;
+
+		case OPT_CROP_RIGHT:
+			cropx1 = atoi(optarg);
+			break;
+
+		case OPT_CROP_TOP:
+			cropy1 = atoi(optarg);
+			break;
+
+		case 'h':
+			usage(0, argv[0]);
+			break;
+
+		case 'i' :
+			in = optarg;
+			break;
+
+		case 'o' :
+			out = optarg;
+			break;
+
+		case 'f' :
+			if (strcmp(optarg, "png") == 0)
+				fmt = OUT_FMT_PNG;
+			else
+				die(1, "unsupported output format %s\n", optarg);
+			break;
+		}
+	}
+
+	if (optind < argc)
+		die(1, "unknown argument %s\n", argv[optind]);
+
+	if (!in)
+		die(1, "missing mandatory PNG input file name (-i file)\n");
+
+	if (fmt == OUT_FMT_PNG && !out)
+		die(1, "missing mandatory PNG output file name (-o file)\n");
+
+	if (out && fmt == OUT_FMT_NONE)
+		die(1, "missing mandatory output format (-f png ?)\n");
+
+	if (!read_rgba_file(in, &img))
+		die(2, "failed to read file %s\n", in);
 
 	if (!rgba_to_gray(&img))
 		die(3, "failed to convert image to gray\n");
 
+	if ((cropx0 || cropy0 || cropx1 || cropy1) &&
+	    !crop_gray_image(&img, cropx0, cropy0, img.w - 1 - cropx1, img.h - 1 - cropy1))
+		die(4, "failed to crop image\n");
+
 	if (!gray_to_work(&img))
 		die(3, "failed to convert image to work\n");
 
-	if (!work_to_gray(&img))
-		die(3, "failed to convert image to gray\n");
+	if (fmt == OUT_FMT_PNG) {
+		if (!work_to_gray(&img))
+			die(3, "failed to convert image to gray\n");
 
-	//if (!crop_gray_image(&img, 20, 20, img.w - 21, img.h - 21))
-	//	die(4, "failed to crop image\n");
-
-	if (!write_gray_file(argv[2], &img))
-		die(5, "failed to write file %s\n", argv[2]);
+		if (!write_gray_file(out, &img))
+			die(5, "failed to write file %s\n", out);
+	}
 
 	free_image(&img);
 	return 0;
