@@ -38,6 +38,7 @@ const struct option long_options[] = {
 	{"add",         required_argument, 0, 'a'              },
 	{"mul",         required_argument, 0, 'm'              },
 	{"gamma",       required_argument, 0, 'g'              },
+	{"quantize",    required_argument, 0, 'q'              },
 	{"soften",      required_argument, 0, OPT_SOFTEN       },
 	{"crop-bottom", required_argument, 0, OPT_CROP_BOTTOM  },
 	{"crop-left",   required_argument, 0, OPT_CROP_LEFT    },
@@ -52,6 +53,7 @@ enum xfrm_op {
 	XFRM_ADD,
 	XFRM_MUL,
 	XFRM_GAM,
+	XFRM_QUANTIZE,
 	XFRM_SOFTEN,
 };
 
@@ -88,6 +90,7 @@ void usage(int code, const char *cmd)
 	    "  -a --add <value>             add <value> [-1..1] to the intensity\n"
 	    "  -g --gamma <value>           apply gamma value <value>\n"
 	    "  -m --mul <value>             multiply intensity by <value>\n"
+	    "  -q --quantize <levels>       quantize to <levels> levels\n"
 	    "     --soften <value>          subtract neighbors' average times <value>\n"
 	    "", cmd);
 }
@@ -369,6 +372,14 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 					v = exp(log(v + 1.0) / xfrm->arg) / exp(log(2.0) / xfrm->arg);
 					break;
 
+				case XFRM_QUANTIZE:
+					if (v > 0)
+						v = 1.0 - floor((1.0 - v) * xfrm->arg) / xfrm->arg;
+					else
+						v = 1.0 /*- (xfrm->arg - 1.0)*/ / xfrm->arg;
+					//v = 1.0 - v / xfrm->arg;
+					break;
+
 				case XFRM_SOFTEN:
 					v -= soften[p] * xfrm->arg;
 					break;
@@ -408,7 +419,7 @@ int main(int argc, char **argv)
 
 	while (1) {
 		int option_index = 0;
-		int c = getopt_long(argc, argv, "hi:o:f:a:g:m:", long_options, &option_index);
+		int c = getopt_long(argc, argv, "hi:o:f:a:g:m:q:", long_options, &option_index);
 
 		if (c == -1)
 			break;
@@ -459,6 +470,17 @@ int main(int argc, char **argv)
 
 		case 'm':
 			curr = xfrm_new(curr, XFRM_MUL, atof(optarg));
+			if (!curr)
+				die(1, "failed to allocate a new transformation\n", optarg);
+			if (!xfrm)
+				xfrm = curr;
+			break;
+
+		case 'q':
+			if (atof(optarg) < 1)
+				die(1, "quantize levels must be >= 1\n");
+
+			curr = xfrm_new(curr, XFRM_QUANTIZE, atof(optarg));
 			if (!curr)
 				die(1, "failed to allocate a new transformation\n", optarg);
 			if (!xfrm)
