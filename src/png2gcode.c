@@ -587,6 +587,83 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes)
 					base_spindle, 0.0, 0.0, base_feed,
 					img->mmh, img->mmw, 0.0, 0.0);
 			}
+			else if (pass->mode == PASS_MODE_RASTER) {
+				uint32_t curr_spindle;
+				unsigned int x, y, x0;
+				float xr, yr;   // real positions in millimeters
+
+				fprintf(file, "M4 S%d\nG0 X%.7g Y%.7g\nG1 F%d\n",
+					base_spindle, 0.0, 0.0, base_feed);
+
+				/* principle: we move even lines from left to right and
+				 * odd lines from right to left. Pixels have a width, and
+				 * the beam must be lit over a whole pixel. From left to
+				 * right, we turn the beam on from the pixel's base position
+				 * to the next pixel's base position. From right to left, we
+				 * turn the beam on from the next pixel's base position to
+				 * the target pixel's base position. The beam is always turned
+				 * off when changing line, so each line starts with a G0 which
+				 * may be merged with subsequent zeroes. We try to identify
+				 * longest lines with same output value and move the beam at
+				 * once over them. G0 is used for long zero areas (> 20px).
+				 */
+				for (y = 0; y < img->h; y++) {
+					/* first pass, left to right */
+					if (y >= img->h)
+						break;
+					yr = y * img->mmh / img->h;
+					yr = roundf(yr * 1000.0) / 1000.0;
+
+					curr_spindle = 0;
+					x0 = 0;
+					for (x = 0; x < img->w; x++) {
+						uint32_t spindle = img->work[y * img->w + x] * base_spindle;
+						if (spindle == curr_spindle)
+							continue;
+						xr = x * img->mmw / img->w;
+						xr = roundf(xr * 1000.0) / 1000.0;
+						if (!curr_spindle && (!x0 || x - x0 > 20))
+							fprintf(file, "G0 X%.7g Y%.7g\nG1 F%d\n", xr, yr, base_feed);
+						else
+							fprintf(file, "X%.7g S%d\n", xr, curr_spindle);
+
+						curr_spindle = spindle;
+						if (!spindle)
+							x0 = x;
+					}
+					/* trace last pixels */
+					if (curr_spindle)
+						fprintf(file, "X%.7g S%d\n", roundf(x * img->mmw / img->w * 1000.0) / 1000.0, curr_spindle);
+
+					/* second pass, right to left */
+					y++;
+					if (y >= img->h)
+						break;
+					yr = y * img->mmh / img->h;
+					yr = roundf(yr * 1000.0) / 1000.0;
+
+					curr_spindle = 0;
+					x0 = 0;
+					for (x = img->w; x > 0; x--) {
+						uint32_t spindle = img->work[y * img->w + x - 1] * base_spindle;
+						if (spindle == curr_spindle)
+							continue;
+						xr = x * img->mmw / img->w;
+						xr = roundf(xr * 1000.0) / 1000.0;
+						if (!curr_spindle && (!x0 || x0 - x > 20))
+							fprintf(file, "G0 X%.7g Y%.7g\nG1 F%d\n", xr, yr, base_feed);
+						else
+							fprintf(file, "X%.7g S%d\n", xr, curr_spindle);
+
+						curr_spindle = spindle;
+						if (!spindle)
+							x0 = x + 1;
+					}
+					/* trace last pixels */
+					if (curr_spindle)
+						fprintf(file, "X%.7g S%d\n", roundf(x * img->mmw / img->w * 1000.0) / 1000.0, curr_spindle);
+				}
+			}
 		}
 	}
 
