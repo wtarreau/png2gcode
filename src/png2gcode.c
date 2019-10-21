@@ -15,6 +15,8 @@ struct image {
 	uint8_t *rgba; // RGBA buffer
 	uint8_t *gray; // grayscale buffer
 	float *work;   // work area: 0.0 = white, 1.0+ = black
+	float mmw;     // image width in millimiters
+	float mmh;     // image height in millimeters
 };
 
 enum out_fmt {
@@ -28,6 +30,11 @@ enum opt {
 	OPT_CROP_RIGHT,
 	OPT_CROP_TOP,
 	OPT_SOFTEN,
+	OPT_IMGW,
+	OPT_IMGH,
+	OPT_PIXW,
+	OPT_PIXH,
+	OPT_PIXS,
 };
 
 const struct option long_options[] = {
@@ -45,6 +52,11 @@ const struct option long_options[] = {
 	{"crop-left",   required_argument, 0, OPT_CROP_LEFT    },
 	{"crop-right",  required_argument, 0, OPT_CROP_RIGHT   },
 	{"crop-top",    required_argument, 0, OPT_CROP_TOP     },
+	{"image-width", required_argument, 0, OPT_IMGW         },
+	{"image-height",required_argument, 0, OPT_IMGH         },
+	{"pixel-width", required_argument, 0, OPT_PIXW         },
+	{"pixel-height",required_argument, 0, OPT_PIXH         },
+	{"pixel-size",  required_argument, 0, OPT_PIXS         },
 	{0,             0,                 0, 0                }
 };
 
@@ -88,6 +100,11 @@ void usage(int code, const char *cmd)
 	    "     --crop-left   <size>      crop this number of pixels from the left\n"
 	    "     --crop-right  <size>      crop this number of pixels from the right\n"
 	    "     --crop-top    <size>      crop this number of pixels from the top\n"
+	    "     --image-width  <size>     image width in millimeters (default: automatic)\n"
+	    "     --image-height <size>     image height in millimeters (default: automatic)\n"
+	    "     --pixel-width  <size>     pixel width in millimeters\n"
+	    "     --pixel-height <size>     pixel height in millimeters\n"
+	    "     --pixel-size   <size>     pixel size in millimeters (sets width and height)\n"
 	    "Transformations are series of operations applied to the work area:\n"
 	    "  -a --add <value>             add <value> [-1..1] to the intensity\n"
 	    "  -g --gamma <value>           apply gamma value <value>\n"
@@ -430,6 +447,7 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 
 int main(int argc, char **argv)
 {
+	float pixw = 0, pixh = 0, imgw = 0, imgh = 0;
 	int cropx0 = 0, cropy0 = 0, cropx1 = 0, cropy1 = 0;
 	enum out_fmt fmt = OUT_FMT_NONE;
 	struct xfrm *curr = NULL;
@@ -471,6 +489,26 @@ int main(int argc, char **argv)
 				die(1, "failed to allocate a new transformation\n", optarg);
 			if (!xfrm)
 				xfrm = curr;
+			break;
+
+		case OPT_IMGW:
+			imgw = atof(optarg);
+			break;
+
+		case OPT_IMGH:
+			imgh = atof(optarg);
+			break;
+
+		case OPT_PIXW:
+			pixw = atof(optarg);
+			break;
+
+		case OPT_PIXH:
+			pixh = atof(optarg);
+			break;
+
+		case OPT_PIXS:
+			pixh = pixw = atof(optarg);
 			break;
 
 		case 'a':
@@ -549,6 +587,9 @@ int main(int argc, char **argv)
 	if (out && fmt == OUT_FMT_NONE)
 		die(1, "missing mandatory output format (-f png ?)\n");
 
+	if ((imgw && pixw) || (imgh && pixh))
+		die(1, "not possible to set both image dimensions and pixel dimensions\n");
+
 	if (!read_rgba_file(in, &img))
 		die(2, "failed to read file %s\n", in);
 
@@ -558,6 +599,25 @@ int main(int argc, char **argv)
 	if ((cropx0 || cropy0 || cropx1 || cropy1) &&
 	    !crop_gray_image(&img, cropx0, cropy0, img.w - 1 - cropx1, img.h - 1 - cropy1))
 		die(4, "failed to crop image\n");
+
+	if (imgw && !imgh)
+		imgh = imgw * img.h / img.w;
+	else if (!imgw && imgh)
+		imgw = imgh * img.w / img.h;
+
+	if (imgw)
+		img.mmw = imgw;
+	else if (pixw)
+		img.mmw = pixw * img.w;
+	else
+		img.mmw = 0;
+
+	if (imgh)
+		img.mmh = imgh;
+	else if (pixh)
+		img.mmh = pixh * img.h;
+	else
+		img.mmw = 0;
 
 	if (!gray_to_work(&img))
 		die(3, "failed to convert image to work\n");
