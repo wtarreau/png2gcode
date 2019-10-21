@@ -9,6 +9,12 @@
 #include <string.h>
 #include <png.h>
 
+/* default spindle level and feed rate in g-code mode. */
+#define DEFAULT_SPINDLE_SHOW     1
+#define DEFAULT_SPINDLE_RASTER   255
+#define DEFAULT_FEED_SHOW        4800
+#define DEFAULT_FEED_RASTER      1200
+
 struct image {
 	uint32_t w;    // width in pixels
 	uint32_t h;    // height in pixels
@@ -22,6 +28,7 @@ struct image {
 enum out_fmt {
 	OUT_FMT_NONE = 0,
 	OUT_FMT_PNG,
+	OUT_FMT_GCODE,
 };
 
 enum opt {
@@ -47,6 +54,10 @@ const struct option long_options[] = {
 	{"gamma",       required_argument, 0, 'g'              },
 	{"normalize",   no_argument,       0, 'n'              },
 	{"quantize",    required_argument, 0, 'q'              },
+	{"mode",        required_argument, 0, 'M'              },
+	{"feed",        required_argument, 0, 'F'              },
+	{"passes",      required_argument, 0, 'P'              },
+	{"spindle",     required_argument, 0, 'S'              },
 	{"soften",      required_argument, 0, OPT_SOFTEN       },
 	{"crop-bottom", required_argument, 0, OPT_CROP_BOTTOM  },
 	{"crop-left",   required_argument, 0, OPT_CROP_LEFT    },
@@ -77,6 +88,25 @@ struct xfrm {
 	struct xfrm *next;
 };
 
+/* type of operations that can be produced in a G-CODE pass */
+enum pass_mode {
+	PASS_MODE_ORIGIN = 0, // only move to origin
+	PASS_MODE_X,          // move over the X axis
+	PASS_MODE_Y,          // move over the Y axis
+	PASS_MODE_AXIS,       // move over the X then the Y axis
+	PASS_MODE_DIAG,       // move over the diagonal
+	PASS_MODE_CONTOUR,    // move over the contour
+	PASS_MODE_RASTER,     // raster image
+};
+
+struct pass {
+	enum pass_mode mode;
+	int spindle;       // <0 = not set
+	int feed;          // <0 = not set
+	int passes;        // <=0 permitted (pass skipped)
+	struct pass *next; // next pass or NULL
+};
+
 /* display the message and exit with the code */
 __attribute__((noreturn)) void die(int code, const char *format, ...)
 {
@@ -91,9 +121,9 @@ __attribute__((noreturn)) void die(int code, const char *format, ...)
 void usage(int code, const char *cmd)
 {
 	die(code,
-	    "Usage: %s [options]* [transformations]*\n"
+	    "Usage: %s [options]* [transformations]* [passes]*\n"
 	    "  -h --help                    show this help\n"
-	    "  -f --fmt <format>            output format (png)\n"
+	    "  -f --fmt <format>            output format (png, gcode)\n"
 	    "  -i --in <file>               input PNG file name\n"
 	    "  -o --out <file>              output file name\n"
 	    "     --crop-bottom <size>      crop this number of pixels from the bottom\n"
@@ -112,6 +142,11 @@ void usage(int code, const char *cmd)
 	    "  -n --normalize               normalize work from 0.0 to 1.0\n"
 	    "  -q --quantize <levels>       quantize to <levels> levels\n"
 	    "     --soften <value>          subtract neighbors' average times <value>\n"
+	    "Passes are used in G-CODE output format (-f gcode):\n"
+	    "  -M --mode    <mode>          pass mode (origin,x,y,axis,diag,contour,raster)\n"
+	    "  -F --feed    <value>         feed rate (mm/min, def:4800 contour, 1200 raster)\n"
+	    "  -S --spindle <value>         spindle value for intensity 1.0 (def:1 or 255)\n"
+	    "  -P --passes  <value>         number of passes with previous parameters (def:1)\n"
 	    "", cmd);
 }
 
@@ -445,11 +480,32 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 	return 1;
 }
 
+/* create a new g-code pass from previous known one */
+struct pass *pass_new(struct pass *last)
+{
+	struct pass *new;
+
+	new = malloc(sizeof(*new));
+	if (!new)
+		return NULL;
+
+	new->mode    = PASS_MODE_RASTER;
+	new->feed    = -1;
+	new->spindle = -1;
+	new->passes  = 1;
+	if (last)
+		last->next = new;
+	return new;
+}
+
 int main(int argc, char **argv)
 {
 	float pixw = 0, pixh = 0, imgw = 0, imgh = 0;
 	int cropx0 = 0, cropy0 = 0, cropx1 = 0, cropy1 = 0;
 	enum out_fmt fmt = OUT_FMT_NONE;
+	struct pass *curr_pass = NULL;
+	struct pass *last_pass = NULL;
+	struct pass *passes = NULL;
 	struct xfrm *curr = NULL;
 	struct xfrm *xfrm = NULL;
 	const char  *in  = NULL;
@@ -458,7 +514,7 @@ int main(int argc, char **argv)
 
 	while (1) {
 		int option_index = 0;
-		int c = getopt_long(argc, argv, "hi:o:f:a:g:m:q:n", long_options, &option_index);
+		int c = getopt_long(argc, argv, "hi:o:f:a:g:m:q:nM:S:F:P:", long_options, &option_index);
 
 		if (c == -1)
 			break;
@@ -569,8 +625,73 @@ int main(int argc, char **argv)
 		case 'f' :
 			if (strcmp(optarg, "png") == 0)
 				fmt = OUT_FMT_PNG;
+			else if (strcmp(optarg, "gcode") == 0)
+				fmt = OUT_FMT_GCODE;
 			else
 				die(1, "unsupported output format %s\n", optarg);
+			break;
+
+		case 'M':
+			if (!curr_pass) {
+				curr_pass = pass_new(last_pass);
+				if (!curr_pass)
+					die(1, "failed to allocate a new pass\n");
+				if (!passes)
+					passes = curr_pass;
+			}
+
+			if (strcmp(optarg, "origin") == 0)
+				curr_pass->mode = PASS_MODE_ORIGIN;
+			else if (strcmp(optarg, "x") == 0)
+				curr_pass->mode = PASS_MODE_X;
+			else if (strcmp(optarg, "y") == 0)
+				curr_pass->mode = PASS_MODE_Y;
+			else if (strcmp(optarg, "axis") == 0)
+				curr_pass->mode = PASS_MODE_AXIS;
+			else if (strcmp(optarg, "diag") == 0)
+				curr_pass->mode = PASS_MODE_DIAG;
+			else if (strcmp(optarg, "contour") == 0)
+				curr_pass->mode = PASS_MODE_CONTOUR;
+			else if (strcmp(optarg, "raster") == 0)
+				curr_pass->mode = PASS_MODE_RASTER;
+			else
+				die(1, "unknown pass mode %s\n", optarg);
+			break;
+
+		case 'F':
+			if (!curr_pass) {
+				curr_pass = pass_new(last_pass);
+				if (!curr_pass)
+					die(1, "failed to allocate a new pass\n");
+				if (!passes)
+					passes = curr_pass;
+			}
+			curr_pass->feed = atoi(optarg);
+			break;
+
+		case 'S':
+			if (!curr_pass) {
+				curr_pass = pass_new(last_pass);
+				if (!curr_pass)
+					die(1, "failed to allocate a new pass\n");
+				if (!passes)
+					passes = curr_pass;
+			}
+			curr_pass->spindle = atoi(optarg);
+			break;
+
+		case 'P':
+			if (!curr_pass) {
+				curr_pass = pass_new(last_pass);
+				if (!curr_pass)
+					die(1, "failed to allocate a new pass\n");
+				if (!passes)
+					passes = curr_pass;
+			}
+			curr_pass->passes = atoi(optarg);
+			/* this completes the current pass */
+			last_pass = curr_pass;
+			curr_pass = NULL;
 			break;
 		}
 	}
@@ -618,6 +739,9 @@ int main(int argc, char **argv)
 		img.mmh = pixh * img.h;
 	else
 		img.mmw = 0;
+
+	if (fmt == OUT_FMT_GCODE && (!img.mmh || !img.mmw))
+		die(1, "output image width/height are mandatory in G-CODE output\n");
 
 	if (!gray_to_work(&img))
 		die(3, "failed to convert image to work\n");
