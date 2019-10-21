@@ -38,6 +38,7 @@ const struct option long_options[] = {
 	{"add",         required_argument, 0, 'a'              },
 	{"mul",         required_argument, 0, 'm'              },
 	{"gamma",       required_argument, 0, 'g'              },
+	{"normalize",   no_argument,       0, 'n'              },
 	{"quantize",    required_argument, 0, 'q'              },
 	{"soften",      required_argument, 0, OPT_SOFTEN       },
 	{"crop-bottom", required_argument, 0, OPT_CROP_BOTTOM  },
@@ -53,6 +54,7 @@ enum xfrm_op {
 	XFRM_ADD,
 	XFRM_MUL,
 	XFRM_GAM,
+	XFRM_NORMALIZE,
 	XFRM_QUANTIZE,
 	XFRM_SOFTEN,
 };
@@ -90,6 +92,7 @@ void usage(int code, const char *cmd)
 	    "  -a --add <value>             add <value> [-1..1] to the intensity\n"
 	    "  -g --gamma <value>           apply gamma value <value>\n"
 	    "  -m --mul <value>             multiply intensity by <value>\n"
+	    "  -n --normalize               normalize work from 0.0 to 1.0\n"
 	    "  -q --quantize <levels>       quantize to <levels> levels\n"
 	    "     --soften <value>          subtract neighbors' average times <value>\n"
 	    "", cmd);
@@ -328,6 +331,9 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 	float *soften = NULL;
 
 	while (xfrm) {
+		float norm_min = 1.0;
+		float norm_max = 0.0;
+
 		if (xfrm->op == XFRM_SOFTEN) {
 			uint32_t px, py;
 			soften = malloc(img->h * img->w * sizeof(*soften));
@@ -352,6 +358,18 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 					soften[y * img->w + x] = v / 8.0;
 				}
 			}
+		}
+		else if (xfrm->op == XFRM_NORMALIZE) {
+			for (y = 0; y < img->h; y++) {
+				for (x = 0; x < img->w; x++) {
+					float v = img->work[y * img->w + x];
+					if (v < norm_min)
+						norm_min = v;
+					if (v > norm_max)
+						norm_max = v;
+				}
+			}
+
 		}
 
 		for (y = 0; y < img->h; y++) {
@@ -384,6 +402,9 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 					v -= soften[p] * xfrm->arg;
 					break;
 
+				case XFRM_NORMALIZE:
+					v = (v - norm_min) / (norm_max - norm_min);
+					break;
 				default:
 					break;
 				}
@@ -419,7 +440,7 @@ int main(int argc, char **argv)
 
 	while (1) {
 		int option_index = 0;
-		int c = getopt_long(argc, argv, "hi:o:f:a:g:m:q:", long_options, &option_index);
+		int c = getopt_long(argc, argv, "hi:o:f:a:g:m:q:n", long_options, &option_index);
 
 		if (c == -1)
 			break;
@@ -470,6 +491,14 @@ int main(int argc, char **argv)
 
 		case 'm':
 			curr = xfrm_new(curr, XFRM_MUL, atof(optarg));
+			if (!curr)
+				die(1, "failed to allocate a new transformation\n", optarg);
+			if (!xfrm)
+				xfrm = curr;
+			break;
+
+		case 'n':
+			curr = xfrm_new(curr, XFRM_NORMALIZE, 0);
 			if (!curr)
 				die(1, "failed to allocate a new transformation\n", optarg);
 			if (!xfrm)
