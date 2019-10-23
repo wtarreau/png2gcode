@@ -633,7 +633,7 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 						xr = x * img->mmw / img->w;
 						xr = roundf(xr * 1000.0) / 1000.0;
 						if (!curr_spindle && (!x0 || x - x0 > 20))
-							fprintf(file, "G0 X%.7g Y%.7g\nG1 F%d\n", xr, yr, base_feed);
+							fprintf(file, "G0 X%.7g Y%.7g\nG1 ", xr, yr); // no lf here, at least one X will follow
 						else
 							fprintf(file, "X%.7g S%d\n", xr, curr_spindle);
 
@@ -661,7 +661,7 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 						xr = x * img->mmw / img->w;
 						xr = roundf(xr * 1000.0) / 1000.0;
 						if (!curr_spindle && (!x0 || x0 - x > 20))
-							fprintf(file, "G0 X%.7g Y%.7g\nG1 F%d\n", xr, yr, base_feed);
+							fprintf(file, "G0 X%.7g Y%.7g\nG1 ", xr, yr);
 						else
 							fprintf(file, "X%.7g S%d\n", xr, curr_spindle);
 
