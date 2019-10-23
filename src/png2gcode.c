@@ -602,8 +602,8 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 				unsigned int x, y, x0;
 				float xr, yr;   // real positions in millimeters
 
-				fprintf(file, "M4 S%d\nG0 X%.7g Y%.7g\nG1 F%d\n",
-					base_spindle, 0.0, 0.0, base_feed);
+				fprintf(file, "M4 S%d\nG1 F%d\n",
+					base_spindle, base_feed);
 
 				/* principle: we move even lines from left to right and
 				 * odd lines from right to left. Pixels have a width, and
