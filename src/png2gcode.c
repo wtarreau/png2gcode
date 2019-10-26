@@ -374,6 +374,16 @@ struct xfrm *xfrm_new(struct xfrm *curr, enum xfrm_op op, float arg)
 	return new;
 }
 
+/* returns the pixel intensity at <x,y> or 0 if outside of the viewing area */
+float get_pix(const struct image *img, uint32_t x, uint32_t y)
+{
+	if (y >= img->h)
+		return 0;
+	if (x >= img->w)
+		return 0;
+	return img->work[y * img->w + x];
+}
+
 /* apply transformations starting at <xfrm> to image <img>. Return non-zero on
  * success, zero on failure.
  */
@@ -387,7 +397,6 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 		float norm_max = 0.0;
 
 		if (xfrm->op == XFRM_SOFTEN) {
-			uint32_t px, py;
 			soften = malloc(img->h * img->w * sizeof(*soften));
 			if (!soften)
 				return 0;
@@ -396,18 +405,21 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 				for (x = 0; x < img->w; x++) {
 					float v = 0.0;
 
-					for (py = y - 1; py != y + 2; py++) {
-						for (px = x - 1; px != x + 2; px++) {
-							/* clip to image border and don't count current point */
-							if (py >= img->h ||
-							    px >= img->w ||
-							    (px == x && py == y))
-								continue;
+					/* quadratic distance effect hence /2 for
+					 * diagonal. Also don't count current pixel.
+					 */
+					v += get_pix(img, x - 1, y - 1) / 2.0;
+					v += get_pix(img, x + 0, y - 1);
+					v += get_pix(img, x + 1, y - 1) / 2.0;
 
-							v += img->work[py * img->w + px];
-						}
-					}
-					soften[y * img->w + x] = v / 8.0;
+					v += get_pix(img, x - 1, y);
+					v += get_pix(img, x + 1, y);
+
+					v += get_pix(img, x - 1, y + 1) / 2.0;
+					v += get_pix(img, x + 0, y + 1);
+					v += get_pix(img, x + 1, y + 1) / 2.0;
+
+					soften[y * img->w + x] = v / 6.0;
 				}
 			}
 		}
