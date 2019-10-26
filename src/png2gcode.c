@@ -434,8 +434,11 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 					v += xfrm->arg;
 					break;
 
-				case XFRM_MUL:
-					v *= xfrm->arg;
+				case XFRM_MUL: /* negative inverts starting from 1.0 */
+					if (xfrm->arg >= 0.0)
+						v *= xfrm->arg;
+					else
+						v = 1.0 + v * xfrm->arg;
 					break;
 
 				case XFRM_GAM:
