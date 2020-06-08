@@ -97,6 +97,7 @@ enum pass_mode {
 	PASS_MODE_DIAG,       // move over the diagonal
 	PASS_MODE_CONTOUR,    // move over the contour
 	PASS_MODE_RASTER,     // raster image, bidirectional
+	PASS_MODE_RASTER_LR,  // raster image left-to-right only
 	PASS_MODES            // must be last one
 };
 
@@ -108,6 +109,7 @@ const char *pass_mode_names[PASS_MODES] = {
 	[PASS_MODE_DIAG]      = "diag",
 	[PASS_MODE_CONTOUR]   =  "contour",
 	[PASS_MODE_RASTER]    = "raster",
+	[PASS_MODE_RASTER_LR] = "raster-lr",
 };
 
 struct pass {
@@ -154,7 +156,7 @@ void usage(int code, const char *cmd)
 	    "  -q --quantize <levels>       quantize to <levels> levels\n"
 	    "     --soften <value>          subtract neighbors' average times <value>\n"
 	    "Passes are used in G-CODE output format (-f gcode):\n"
-	    "  -M --mode    <mode>          pass mode (origin,x,y,axis,diag,contour,raster)\n"
+	    "  -M --mode    <mode>          pass mode (origin,x,y,axis,diag,contour,raster,raster-lr)\n"
 	    "  -F --feed    <value>         feed rate (mm/min, def:4800 contour, 1200 raster)\n"
 	    "  -S --spindle <value>         spindle value for intensity 1.0 (def:1 or 255)\n"
 	    "  -P --passes  <value>         number of passes with previous parameters (def:1)\n"
@@ -586,10 +588,10 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 			pass_num++;
 
 			if (base_feed < 0)
-				base_feed = (pass->mode == PASS_MODE_RASTER) ?
+				base_feed = (pass->mode == PASS_MODE_RASTER || pass->mode == PASS_MODE_RASTER_LR) ?
 					DEFAULT_FEED_RASTER : DEFAULT_FEED_SHOW;
 			if (base_spindle < 0)
-				base_spindle = (pass->mode == PASS_MODE_RASTER) ?
+				base_spindle = (pass->mode == PASS_MODE_RASTER || pass->mode == PASS_MODE_RASTER_LR) ?
 					DEFAULT_SPINDLE_RASTER : DEFAULT_SPINDLE_SHOW;
 
 			fprintf(file, "; pass %d-%d/%d : mode=%s spindle=%d feed=%d\n",
@@ -622,7 +624,7 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 					base_spindle, 0.0, 0.0, base_feed,
 					img->mmh, img->mmw, 0.0, 0.0);
 			}
-			else if (pass->mode == PASS_MODE_RASTER) {
+			else if (pass->mode == PASS_MODE_RASTER || pass->mode == PASS_MODE_RASTER_LR) {
 				uint32_t curr_spindle;
 				unsigned int x, y, x0;
 				float xr, yr;   // real positions in millimeters
@@ -677,6 +679,10 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 					/* trace last pixels */
 					if (curr_spindle)
 						fprintf(file, "X%.7g S%d\n", roundf(x * img->mmw / img->w * 1000.0) / 1000.0, curr_spindle);
+
+					/* go back to left position if LR mode */
+					if (pass->mode == PASS_MODE_RASTER_LR)
+						continue;
 
 					/* second pass, right to left */
 					y++;
