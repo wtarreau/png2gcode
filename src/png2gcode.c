@@ -96,7 +96,18 @@ enum pass_mode {
 	PASS_MODE_AXIS,       // move over the X then the Y axis
 	PASS_MODE_DIAG,       // move over the diagonal
 	PASS_MODE_CONTOUR,    // move over the contour
-	PASS_MODE_RASTER,     // raster image
+	PASS_MODE_RASTER,     // raster image, bidirectional
+	PASS_MODES            // must be last one
+};
+
+const char *pass_mode_names[PASS_MODES] = {
+	[PASS_MODE_ORIGIN] = "origin",
+	[PASS_MODE_X]         = "x",
+	[PASS_MODE_Y]         = "y",
+	[PASS_MODE_AXIS]      = "axis",
+	[PASS_MODE_DIAG]      = "diag",
+	[PASS_MODE_CONTOUR]   =  "contour",
+	[PASS_MODE_RASTER]    = "raster",
 };
 
 struct pass {
@@ -520,7 +531,6 @@ struct pass *pass_new(struct pass *last)
  */
 int emit_gcode(const char *out, struct image *img, const struct pass *passes, int argc, char **argv)
 {
-	const char *pass_mode_names[] = { "origin", "x", "y", "axis", "diag", "contour", "raster" };
 	FILE *file = stdout;
 	const struct pass *pass;
 	int pass_num = 0;
@@ -858,21 +868,10 @@ int main(int argc, char **argv)
 					passes = curr_pass;
 			}
 
-			if (strcmp(optarg, "origin") == 0)
-				curr_pass->mode = PASS_MODE_ORIGIN;
-			else if (strcmp(optarg, "x") == 0)
-				curr_pass->mode = PASS_MODE_X;
-			else if (strcmp(optarg, "y") == 0)
-				curr_pass->mode = PASS_MODE_Y;
-			else if (strcmp(optarg, "axis") == 0)
-				curr_pass->mode = PASS_MODE_AXIS;
-			else if (strcmp(optarg, "diag") == 0)
-				curr_pass->mode = PASS_MODE_DIAG;
-			else if (strcmp(optarg, "contour") == 0)
-				curr_pass->mode = PASS_MODE_CONTOUR;
-			else if (strcmp(optarg, "raster") == 0)
-				curr_pass->mode = PASS_MODE_RASTER;
-			else
+			for (curr_pass->mode = PASS_MODE_ORIGIN; curr_pass->mode < PASS_MODES; curr_pass->mode++)
+				if (strcmp(optarg, pass_mode_names[curr_pass->mode]) == 0)
+					break;
+			if (curr_pass->mode >= PASS_MODES)
 				die(1, "unknown pass mode %s\n", optarg);
 			break;
 
