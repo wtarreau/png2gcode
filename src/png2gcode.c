@@ -53,6 +53,7 @@ const struct option long_options[] = {
 	{"mul",         required_argument, 0, 'm'              },
 	{"gamma",       required_argument, 0, 'g'              },
 	{"hash",        no_argument,       0, 'H'              },
+	{"diffuse",     required_argument, 0, 'd'              },
 	{"normalize",   no_argument,       0, 'n'              },
 	{"quantize",    required_argument, 0, 'q'              },
 	{"mode",        required_argument, 0, 'M'              },
@@ -122,6 +123,12 @@ struct pass {
 	struct pass *next; // next pass or NULL
 };
 
+struct material {
+	float diffusion;
+} material = {
+	      .diffusion = 0.18,  // 18% in each direction for each step results in 100 spread in 8 pixels
+};
+
 /* display the message and exit with the code */
 __attribute__((noreturn)) void die(int code, const char *format, ...)
 {
@@ -163,6 +170,8 @@ void usage(int code, const char *cmd)
 	    "  -F --feed    <value>         feed rate (mm/min, def:4800 contour, 1200 raster)\n"
 	    "  -S --spindle <value>         spindle value for intensity 1.0 (def:1 or 255)\n"
 	    "  -P --passes  <value>         number of passes with previous parameters (def:1)\n"
+	    "Material characteristics:\n"
+	    "  -d --diffuse <ratio>         adjacent radiation for hash & soften (def:0.18)\n"
 	    "", cmd);
 }
 
@@ -412,7 +421,7 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 		float norm_min = 1.0;
 		float norm_max = 0.0;
 
-		if (xfrm->op == XFRM_SOFTEN) {
+		if (xfrm->op == XFRM_SOFTEN || xfrm->op == XFRM_HASH) {
 			soften = malloc(img->h * img->w * sizeof(*soften));
 			if (!soften)
 				return 0;
@@ -420,22 +429,25 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 			for (y = 0; y < img->h; y++) {
 				for (x = 0; x < img->w; x++) {
 					float v = 0.0;
+					float d = material.diffusion;
+					float d2 = 2*d*d;
 
-					/* quadratic distance effect hence /2 for
-					 * diagonal. Also don't count current pixel.
+					/* quadratic distance effect hence 2*d^2 for diagonal
+					 * since it spreads through two adjacent pixels. Also
+					 * don't count current pixel.
 					 */
-					v += get_pix(img, x - 1, y - 1) / 2.0;
-					v += get_pix(img, x + 0, y - 1);
-					v += get_pix(img, x + 1, y - 1) / 2.0;
+					v += get_pix(img, x - 1, y - 1) * d2;
+					v += get_pix(img, x + 0, y - 1) * d;
+					v += get_pix(img, x + 1, y - 1) * d2;
 
-					v += get_pix(img, x - 1, y);
-					v += get_pix(img, x + 1, y);
+					v += get_pix(img, x - 1, y) * d;
+					v += get_pix(img, x + 1, y) * d;
 
-					v += get_pix(img, x - 1, y + 1) / 2.0;
-					v += get_pix(img, x + 0, y + 1);
-					v += get_pix(img, x + 1, y + 1) / 2.0;
+					v += get_pix(img, x - 1, y + 1) * d2;
+					v += get_pix(img, x + 0, y + 1) * d;
+					v += get_pix(img, x + 1, y + 1) * d2;
 
-					soften[y * img->w + x] = v / 6.0;
+					soften[y * img->w + x] = v;
 				}
 			}
 		}
@@ -475,7 +487,7 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 
 				case XFRM_HASH:
 					if ((x ^ y) & 1)
-						v = 0.0;
+						v -= soften[p];
 					break;
 
 				case XFRM_QUANTIZE:
@@ -506,11 +518,8 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 			}
 		}
 
-		if (xfrm->op == XFRM_SOFTEN) {
-			free(soften);
-			soften = NULL;
-		}
-
+		free(soften);
+		soften = NULL;
 		xfrm = xfrm->next;
 	}
 	return 1;
@@ -756,7 +765,7 @@ int main(int argc, char **argv)
 
 	while (1) {
 		int option_index = 0;
-		int c = getopt_long(argc, argv, "hi:o:f:a:g:m:q:HnM:S:F:P:", long_options, &option_index);
+		int c = getopt_long(argc, argv, "hi:o:f:a:g:m:q:d:HnM:S:F:P:", long_options, &option_index);
 
 		if (c == -1)
 			break;
@@ -858,6 +867,10 @@ int main(int argc, char **argv)
 				die(1, "failed to allocate a new transformation\n", optarg);
 			if (!xfrm)
 				xfrm = curr;
+			break;
+
+		case 'd':
+			material.diffusion = atof(optarg);
 			break;
 
 		case 'h':
