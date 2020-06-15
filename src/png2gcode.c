@@ -52,6 +52,7 @@ const struct option long_options[] = {
 	{"add",         required_argument, 0, 'a'              },
 	{"mul",         required_argument, 0, 'm'              },
 	{"gamma",       required_argument, 0, 'g'              },
+	{"hash",        no_argument,       0, 'H'              },
 	{"normalize",   no_argument,       0, 'n'              },
 	{"quantize",    required_argument, 0, 'q'              },
 	{"mode",        required_argument, 0, 'M'              },
@@ -77,6 +78,7 @@ enum xfrm_op {
 	XFRM_ADD,
 	XFRM_MUL,
 	XFRM_GAM,
+	XFRM_HASH,
 	XFRM_NORMALIZE,
 	XFRM_QUANTIZE,
 	XFRM_SOFTEN,
@@ -151,6 +153,7 @@ void usage(int code, const char *cmd)
 	    "Transformations are series of operations applied to the work area:\n"
 	    "  -a --add <value>             add <value> [-1..1] to the intensity\n"
 	    "  -g --gamma <value>           apply gamma value <value>\n"
+	    "  -H --hash                    hash the image by setting 50% of the dots to intensity 0\n"
 	    "  -m --mul <value>             multiply intensity by <value>\n"
 	    "  -n --normalize               normalize work from 0.0 to 1.0\n"
 	    "  -q --quantize <levels>       quantize to <levels> levels\n"
@@ -470,6 +473,11 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 					v = exp(log(v + 1.0) / xfrm->arg) / exp(log(2.0) / xfrm->arg);
 					break;
 
+				case XFRM_HASH:
+					if ((x ^ y) & 1)
+						v = 0.0;
+					break;
+
 				case XFRM_QUANTIZE:
 					if (v > 0)
 						v = 1.0 - floor((1.0 - v) * xfrm->arg) / xfrm->arg;
@@ -748,7 +756,7 @@ int main(int argc, char **argv)
 
 	while (1) {
 		int option_index = 0;
-		int c = getopt_long(argc, argv, "hi:o:f:a:g:m:q:nM:S:F:P:", long_options, &option_index);
+		int c = getopt_long(argc, argv, "hi:o:f:a:g:m:q:HnM:S:F:P:", long_options, &option_index);
 
 		if (c == -1)
 			break;
@@ -811,6 +819,14 @@ int main(int argc, char **argv)
 
 		case 'g':
 			curr = xfrm_new(curr, XFRM_GAM, atof(optarg));
+			if (!curr)
+				die(1, "failed to allocate a new transformation\n", optarg);
+			if (!xfrm)
+				xfrm = curr;
+			break;
+
+		case 'H':
+			curr = xfrm_new(curr, XFRM_HASH, 0);
 			if (!curr)
 				die(1, "failed to allocate a new transformation\n", optarg);
 			if (!xfrm)
