@@ -859,8 +859,8 @@ int main(int argc, char **argv)
 			break;
 
 		case 'q':
-			if (atof(optarg) < 1)
-				die(1, "quantize levels must be >= 1\n");
+			if (atof(optarg) <= 1)
+				die(1, "quantize levels must be > 1\n");
 
 			curr = xfrm_new(curr, XFRM_QUANTIZE, atof(optarg));
 			if (!curr)
