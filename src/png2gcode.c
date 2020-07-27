@@ -491,11 +491,11 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 					break;
 
 				case XFRM_QUANTIZE:
+					/* make sure to create even steps from 0.0 to 1.0 inclusive */
 					if (v > 0)
-						v = 1.0 - floor((1.0 - v) * xfrm->arg) / xfrm->arg;
+						v = floor(v * xfrm->arg) / (xfrm->arg - 1);
 					else
-						v = 1.0 /*- (xfrm->arg - 1.0)*/ / xfrm->arg;
-					//v = 1.0 - v / xfrm->arg;
+						v = 0;
 					break;
 
 				case XFRM_SOFTEN:
