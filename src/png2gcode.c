@@ -145,7 +145,7 @@ void usage(int code, const char *cmd)
 	die(code,
 	    "Usage: %s [options]* [transformations]* [passes]*\n"
 	    "  -h --help                    show this help\n"
-	    "  -f --fmt <format>            output format (png, gcode)\n"
+	    "  -f --fmt <format>            output format (png, gcode), defaults to file ext\n"
 	    "  -i --in <file>               input PNG file name\n"
 	    "  -o --out <file>              output file name\n"
 	    "     --crop-bottom <size>      crop this number of pixels from the bottom\n"
@@ -957,8 +957,16 @@ int main(int argc, char **argv)
 	if (fmt == OUT_FMT_PNG && !out)
 		die(1, "missing mandatory PNG output file name (-o file)\n");
 
-	if (out && fmt == OUT_FMT_NONE)
-		die(1, "missing mandatory output format (-f png ?)\n");
+	if (fmt == OUT_FMT_NONE) {
+		if (!out ||
+		    (strlen(out) >= 4 && strcasecmp(out + strlen(out) - 4, ".txt") == 0) ||
+		    (strlen(out) >= 6 && strcasecmp(out + strlen(out) - 6, ".gcode") == 0))
+			fmt = OUT_FMT_GCODE;
+		else if (strlen(out) >= 4 && strcasecmp(out + strlen(out) - 4, ".png") == 0)
+			fmt = OUT_FMT_PNG;
+		else
+			die(1, "missing mandatory output format (-f png ?)\n");
+	}
 
 	if ((imgw && pixw) || (imgh && pixh))
 		die(1, "not possible to set both image dimensions and pixel dimensions\n");
