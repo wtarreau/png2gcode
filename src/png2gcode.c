@@ -56,6 +56,7 @@ const struct option long_options[] = {
 	{"diffuse",     required_argument, 0, 'd'              },
 	{"normalize",   no_argument,       0, 'n'              },
 	{"quantize",    required_argument, 0, 'q'              },
+	{"qfreq",       required_argument, 0, 'Q'              },
 	{"mode",        required_argument, 0, 'M'              },
 	{"feed",        required_argument, 0, 'F'              },
 	{"passes",      required_argument, 0, 'P'              },
@@ -83,6 +84,7 @@ enum xfrm_op {
 	XFRM_NORMALIZE,
 	XFRM_QUANTIZE,
 	XFRM_SOFTEN,
+	XFRM_QFREQ,
 };
 
 struct xfrm {
@@ -164,6 +166,7 @@ void usage(int code, const char *cmd)
 	    "  -m --mul <value>             multiply intensity by <value>\n"
 	    "  -n --normalize               normalize work from 0.0 to 1.0\n"
 	    "  -q --quantize <levels>       quantize to <levels> levels\n"
+	    "  -Q --qfreq <levels>          quantize to <levels> levels based on frequency\n"
 	    "     --soften <value>          subtract neighbors' average times <value>\n"
 	    "Passes are used in G-CODE output format (-f gcode):\n"
 	    "  -M --mode    <mode>          pass mode (origin,x,y,axis,diag,contour,raster,raster-lr)\n"
@@ -415,7 +418,9 @@ float get_pix(const struct image *img, uint32_t x, uint32_t y)
 int xfrm_apply(struct image *img, struct xfrm *xfrm)
 {
 	uint32_t x, y;
+	uint32_t *freq = NULL;
 	float *soften = NULL;
+	uint32_t q;
 
 	while (xfrm) {
 		float norm_min = 1.0;
@@ -463,6 +468,40 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 			}
 
 		}
+		else if (xfrm->op == XFRM_QFREQ) {
+			/* normalize values on 10 bits and store their frequencies */
+			freq = calloc(1024, sizeof(*freq));
+			if (!freq)
+				return 0;
+
+			for (y = 0; y < img->h; y++) {
+				for (x = 0; x < img->w; x++) {
+					uint32_t p = y * img->w + x;
+					float    v = img->work[p];
+
+					if (v <= 0.0)
+						q = 0;
+					else if (v >= 1.0)
+						q = 1023;
+					else
+						q = 1023 * v;
+					freq[q]++;
+				}
+			}
+
+			/* make each value reflect its position in the spectrum.
+			 * The last value will have the total number of pixels
+			 * and should equal h*w. As such, now any pixel value v
+			 * passed through freq[] can have its frequency normalized
+			 * between [0..1] by dividing by w*h.
+			 */
+			for (q = 1; q < 1024; q++) {
+				freq[q] += freq[q - 1];
+			}
+			//for (q = 0; q < 1024; q++) {
+			//	printf("%u: %u (%f)\n", q, freq[q], (double)freq[q]/freq[1023]);
+			//}
+		}
 
 		for (y = 0; y < img->h; y++) {
 			for (x = 0; x < img->w; x++) {
@@ -498,6 +537,24 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 						v = 0;
 					break;
 
+
+				case XFRM_QFREQ:
+					if (v <= 0.0)
+						q = 0;
+					else if (v >= 1.0)
+						q = 1023;
+					else
+						q = 1023 * v;
+
+					v = (double)freq[q] / (img->h * img->w);
+
+					/* make sure to create even steps from 0.0 to 1.0 inclusive */
+					if (v > 0)
+						v = floor(v * xfrm->arg) / (xfrm->arg - 1);
+					else
+						v = 0;
+					break;
+
 				case XFRM_SOFTEN:
 					v -= soften[p] * xfrm->arg;
 					break;
@@ -520,6 +577,8 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 
 		free(soften);
 		soften = NULL;
+		free(freq);
+		freq = NULL;
 		xfrm = xfrm->next;
 	}
 	return 1;
@@ -765,7 +824,7 @@ int main(int argc, char **argv)
 
 	while (1) {
 		int option_index = 0;
-		int c = getopt_long(argc, argv, "hi:o:f:a:g:m:q:d:HnM:S:F:P:", long_options, &option_index);
+		int c = getopt_long(argc, argv, "hi:o:f:a:g:m:q:Q:d:HnM:S:F:P:", long_options, &option_index);
 
 		if (c == -1)
 			break;
@@ -863,6 +922,17 @@ int main(int argc, char **argv)
 				die(1, "quantize levels must be > 1\n");
 
 			curr = xfrm_new(curr, XFRM_QUANTIZE, atof(optarg));
+			if (!curr)
+				die(1, "failed to allocate a new transformation\n", optarg);
+			if (!xfrm)
+				xfrm = curr;
+			break;
+
+		case 'Q':
+			if (atof(optarg) <= 1)
+				die(1, "quantize levels must be > 1\n");
+
+			curr = xfrm_new(curr, XFRM_QFREQ, atof(optarg));
 			if (!curr)
 				die(1, "failed to allocate a new transformation\n", optarg);
 			if (!xfrm)
