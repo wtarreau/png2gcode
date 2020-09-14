@@ -53,6 +53,7 @@ const struct option long_options[] = {
 	{"mul",         required_argument, 0, 'm'              },
 	{"gamma",       required_argument, 0, 'g'              },
 	{"hash",        no_argument,       0, 'H'              },
+	{"twins",       no_argument,       0, 't'              },
 	{"diffuse",     required_argument, 0, 'd'              },
 	{"normalize",   no_argument,       0, 'n'              },
 	{"quantize",    required_argument, 0, 'q'              },
@@ -85,6 +86,7 @@ enum xfrm_op {
 	XFRM_QUANTIZE,
 	XFRM_SOFTEN,
 	XFRM_QFREQ,
+	XFRM_TWINS,
 };
 
 struct xfrm {
@@ -162,7 +164,8 @@ void usage(int code, const char *cmd)
 	    "Transformations are series of operations applied to the work area:\n"
 	    "  -a --add <value>             add <value> [-1..1] to the intensity\n"
 	    "  -g --gamma <value>           apply gamma value <value>\n"
-	    "  -H --hash                    hash the image by setting 50% of the dots to intensity 0\n"
+	    "  -H --hash                    hash the image by setting 50%% of the dots to intensity 0\n"
+	    "  -t --twins                   average adjacent pixels and send as opposed twins\n"
 	    "  -m --mul <value>             multiply intensity by <value>\n"
 	    "  -n --normalize               normalize work from 0.0 to 1.0\n"
 	    "  -q --quantize <levels>       quantize to <levels> levels\n"
@@ -175,6 +178,8 @@ void usage(int code, const char *cmd)
 	    "  -P --passes  <value>         number of passes with previous parameters (def:1)\n"
 	    "Material characteristics:\n"
 	    "  -d --diffuse <ratio>         adjacent radiation for hash & soften (def:0.18)\n"
+	    "Notes:\n"
+	    "  - for images, use -H for wood or -t on aluminum\n"
 	    "", cmd);
 }
 
@@ -456,6 +461,16 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 				}
 			}
 		}
+		else if (xfrm->op == XFRM_TWINS) {
+			/* we need the average of two adjacent X pixels */
+			soften = malloc(img->h * img->w * sizeof(*soften));
+			if (!soften)
+				return 0;
+
+			for (y = 0; y < img->h; y++)
+				for (x = 0; x < img->w; x++)
+					soften[y * img->w + x] = get_pix(img, x & ~1, y) + get_pix(img, x | 1, y);
+		}
 		else if (xfrm->op == XFRM_NORMALIZE) {
 			for (y = 0; y < img->h; y++) {
 				for (x = 0; x < img->w; x++) {
@@ -527,6 +542,32 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 				case XFRM_HASH:
 					if ((x ^ y) & 1)
 						v -= soften[p];
+					break;
+
+				case XFRM_TWINS:
+					/* average two adjacent X pixels, use (0, 2x) for x<128, (2x-255,255) for x>=128 */
+					v = soften[p];
+
+					if (v < 0.0)
+						v = 0;
+					else if (v > 2.0)
+						v = 2.0;
+
+					if (v < 1.0) {
+						if ((x ^ y) & 1)
+							v = v;
+						else
+							v = 0;
+					} else {
+						if ((x ^ y) & 1)
+							v = 1.0;
+						else
+							v = v - 1.0;
+					}
+					if (v < 0.0)
+						abort();
+					else if (v > 1.0)
+						abort();
 					break;
 
 				case XFRM_QUANTIZE:
@@ -824,7 +865,7 @@ int main(int argc, char **argv)
 
 	while (1) {
 		int option_index = 0;
-		int c = getopt_long(argc, argv, "hi:o:f:a:g:m:q:Q:d:HnM:S:F:P:", long_options, &option_index);
+		int c = getopt_long(argc, argv, "hi:o:f:a:g:m:q:Q:d:HtnM:S:F:P:", long_options, &option_index);
 
 		if (c == -1)
 			break;
@@ -895,6 +936,14 @@ int main(int argc, char **argv)
 
 		case 'H':
 			curr = xfrm_new(curr, XFRM_HASH, 0);
+			if (!curr)
+				die(1, "failed to allocate a new transformation\n", optarg);
+			if (!xfrm)
+				xfrm = curr;
+			break;
+
+		case 't':
+			curr = xfrm_new(curr, XFRM_TWINS, 0);
 			if (!curr)
 				die(1, "failed to allocate a new transformation\n", optarg);
 			if (!xfrm)
