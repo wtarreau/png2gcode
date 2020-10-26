@@ -1030,8 +1030,8 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 
 					curr_spindle = 0;
 					x0 = 0;
-					for (x = img->w; x > 0; x--) {
-						uint32_t spindle = img->work[y * img->w + x - 1] * base_spindle;
+					for (x = img->w; x-- > 0; ) {
+						uint32_t spindle = img->work[y * img->w + x] * base_spindle;
 						if (spindle == curr_spindle)
 							continue;
 						xr = x * img->mmw / img->w;
