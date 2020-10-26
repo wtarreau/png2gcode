@@ -33,6 +33,11 @@ enum out_fmt {
 	OUT_FMT_GCODE,
 };
 
+enum out_center {
+	OUT_CNT_NONE = 0,
+	OUT_CNT_AXIS,
+};
+
 enum opt {
 	OPT_CROP_BOTTOM = 256,
 	OPT_CROP_LEFT,
@@ -52,6 +57,7 @@ const struct option long_options[] = {
 	{"help",        no_argument,       0, 'h'              },
 	{"in",          required_argument, 0, 'i'              },
 	{"out",         required_argument, 0, 'o'              },
+	{"center",      required_argument, 0, 'c'              },
 	{"fmt",         required_argument, 0, 'f'              },
 	{"add",         required_argument, 0, 'a'              },
 	{"mul",         required_argument, 0, 'm'              },
@@ -169,6 +175,7 @@ void usage(int code, const char *cmd)
 	    "     --pixel-width  <size>     pixel width in millimeters\n"
 	    "     --pixel-height <size>     pixel height in millimeters\n"
 	    "     --pixel-size   <size>     pixel size in millimeters (sets width and height)\n"
+	    "  -c, --center <mode>          auto-center output coordinates (N=none, A=axis)\n"
 	    "Transformations are series of operations applied to the work area:\n"
 	    "  -a --add <value>             add <value> [-1..1] to the intensity\n"
 	    "  -g --gamma <value>           apply gamma value <value>\n"
@@ -867,6 +874,7 @@ int main(int argc, char **argv)
 {
 	float pixw = 0, pixh = 0, imgw = 0, imgh = 0, orgx = 0, orgy = 0;
 	int cropx0 = 0, cropy0 = 0, cropx1 = 0, cropy1 = 0;
+	enum out_center center_mode = OUT_CNT_NONE;
 	enum out_fmt fmt = OUT_FMT_NONE;
 	struct pass *curr_pass = NULL;
 	struct pass *last_pass = NULL;
@@ -879,7 +887,7 @@ int main(int argc, char **argv)
 
 	while (1) {
 		int option_index = 0;
-		int c = getopt_long(argc, argv, "hi:o:f:a:g:m:q:Q:d:HtnM:S:F:P:", long_options, &option_index);
+		int c = getopt_long(argc, argv, "hi:o:c:f:a:g:m:q:Q:d:HtnM:S:F:P:", long_options, &option_index);
 
 		if (c == -1)
 			break;
@@ -1026,6 +1034,15 @@ int main(int argc, char **argv)
 			out = optarg;
 			break;
 
+		case 'c':
+			if (strcmp(optarg, "N") == 0)
+				center_mode = OUT_CNT_NONE;
+			else if (strcmp(optarg, "A") == 0)
+				center_mode = OUT_CNT_AXIS;
+			else
+				die(1, "unsupported centering mode %s\n", optarg);
+			break;
+
 		case 'f' :
 			if (strcmp(optarg, "png") == 0)
 				fmt = OUT_FMT_PNG;
@@ -1143,6 +1160,11 @@ int main(int argc, char **argv)
 
 	img.orgx = orgx;
 	img.orgy = orgy;
+
+	if (center_mode == OUT_CNT_AXIS) {
+		img.orgx = -img.mmw / 2;
+		img.orgy = -img.mmh / 2;
+	}
 
 	if (fmt == OUT_FMT_GCODE && (!img.mmh || !img.mmw))
 		die(1, "output image width/height are mandatory in G-CODE output\n");
