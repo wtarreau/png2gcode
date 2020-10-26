@@ -25,6 +25,7 @@ struct image {
 	float orgy;    // image vertical origin in millimeters
 	float mmw;     // image width in millimiters
 	float mmh;     // image height in millimeters
+	float diam;    // max computed diameter (if -cC) or zero
 };
 
 enum out_fmt {
@@ -36,6 +37,7 @@ enum out_fmt {
 enum out_center {
 	OUT_CNT_NONE = 0,
 	OUT_CNT_AXIS,
+	OUT_CNT_CIRC,
 };
 
 enum opt {
@@ -175,7 +177,7 @@ void usage(int code, const char *cmd)
 	    "     --pixel-width  <size>     pixel width in millimeters\n"
 	    "     --pixel-height <size>     pixel height in millimeters\n"
 	    "     --pixel-size   <size>     pixel size in millimeters (sets width and height)\n"
-	    "  -c, --center <mode>          auto-center output coordinates (N=none, A=axis)\n"
+	    "  -c, --center <mode>          auto-center output coordinates (N=none, A=axis, C=circle)\n"
 	    "Transformations are series of operations applied to the work area:\n"
 	    "  -a --add <value>             add <value> [-1..1] to the intensity\n"
 	    "  -g --gamma <value>           apply gamma value <value>\n"
@@ -430,6 +432,200 @@ float get_pix(const struct image *img, uint32_t x, uint32_t y)
 	if (x >= img->w)
 		return 0;
 	return img->work[y * img->w + x];
+}
+
+/* computes the square of the distance between points 1 and 2 */
+float sqdist(uint32_t x1, uint32_t y1, uint32_t x2, uint32_t y2, float resx, float resy)
+{
+	resx *= (int)(x2 - x1);
+	resy *= (int)(y2 - y1);
+	return resx * resx + resy * resy;
+}
+
+/* try to figure the center of the smallest circle including all pixels,
+ * returns it as well as the computed radius in non-null pointers. Returns
+ * non-zero on success.
+ */
+int find_center(struct image *img, float *outx, float *outy, float *outrad)
+{
+	int *minx, *maxx, *miny, *maxy;
+	int x, y, x2, y2, pt, npt;
+	uint64_t sumx, sumy;
+	int ctrx, ctry;
+	int moves;
+	int ret;
+	float *radius;
+	float rad, maxrad;
+	float resx, resy;
+	struct point {
+		int x, y;
+	} *pts;
+
+	ret = 0;
+	minx = malloc(img->h * sizeof(*minx));
+	maxx = malloc(img->h * sizeof(*maxx));
+	miny = malloc(img->w * sizeof(*miny));
+	maxy = malloc(img->w * sizeof(*maxy));
+	pts = calloc((img->w + img->h) * 2, sizeof(*pts));
+	radius = calloc(img->w * img->h, sizeof(*pts));
+
+	if (!minx || !maxx || !miny || !maxy || !pts || !radius)
+		goto done;
+
+	resx = img->mmh / img->h;
+	resy = img->mmw / img->w;
+
+	for (y = 0; y < img->h; y++) {
+		minx[y] = maxx[y] = -1;
+		for (x = 0; x < img->w; x++)
+			if (img->work[y * img->w + x] > 0.0) {
+				minx[y] = x;
+				break;
+			}
+		for (x = img->w - 1; x >= 0; x--)
+			if (img->work[y * img->w + x] > 0.0) {
+				maxx[y] = x;
+				break;
+			}
+	}
+
+	for (x = 0; x < img->w; x++) {
+		miny[x] = maxy[x] = -1;
+		for (y = 0; y < img->h; y++)
+			if (img->work[y * img->w + x] > 0.0) {
+				miny[x] = y;
+				break;
+			}
+		for (y = img->h - 1; y >= 0; y--)
+			if (img->work[y * img->w + x] > 0.0) {
+				maxy[x] = y;
+				break;
+			}
+	}
+
+	/* store all boundaries */
+	npt = 0;
+	for (y = 0; y < img->h; y++) {
+		if (minx[y] == -1)
+			continue;
+		pts[npt].x = minx[y];
+		pts[npt].y = y;
+		npt++;
+		if (minx[y] == maxx[y])
+			continue;
+		pts[npt].x = maxx[y];
+		pts[npt].y = y;
+		npt++;
+	}
+	if (!npt)
+		goto done;
+
+	/* find an initial center. With this choice we know there are at
+	 * least pixels in each direction.
+	 */
+	sumx = sumy = 0;
+	for (pt = 0; pt < npt; pt++) {
+		sumx += pts[pt].x;
+		sumy += pts[pt].y;
+	}
+	ctrx = sumx / npt;
+	ctry = sumy / npt;
+
+	/* oscillate around the current center and move it towards the smallest max */
+	moves = 0;
+	while (1) {
+		maxrad = 0;
+		for (y = ctry - 1; y <= ctry + 1; y++) {
+			if (y < 0 || y >= img->h)
+				continue;
+
+			for (x = ctrx - 1; x <= ctrx + 1; x++) {
+				if (x < 0 || x >= img->w)
+					continue;
+
+				if (radius[y * img->w + x] > 0)
+					continue; // already calculated
+				maxrad = 0;
+				for (pt = 0; pt < npt; pt++) {
+					rad = sqdist(x, y, pts[pt].x, pts[pt].y, resx, resy);
+					if (rad > maxrad)
+						maxrad = rad;
+				}
+				radius[y * img->w + x] = maxrad;
+			}
+		}
+
+		/* we have 9 measures around the current center, let's move in
+		 * the most optimal direction now to pick the smallest radius,
+		 * or stop if already at the center.
+		 */
+
+		x2 = ctrx; y2 = ctry;
+		maxrad = 0;
+		for (y = ctry - 1; y <= ctry + 1; y++) {
+			if (y < 0 || y >= img->h)
+				continue;
+
+			for (x = ctrx - 1; x <= ctrx + 1; x++) {
+				if (x < 0 || x >= img->w)
+					continue;
+				if (maxrad == 0 || radius[y * img->w + x] < maxrad) {
+					maxrad = radius[y * img->w + x];
+					x2 = x;
+					y2 = y;
+				}
+			}
+		}
+
+		if (x2 == ctrx && y2 == ctry)
+			break;
+
+		moves++;
+		ctrx = x2; ctry = y2;
+	}
+
+	rad = sqrt(radius[ctry * img->w + ctrx]);
+	printf("Found optimal center at %d,%d in %d moves, max radius=%.2f mm, diam=%.2f mm\n",
+	       ctrx, ctry, moves, rad, 2*rad);
+
+	if (outx)
+		*outx = ctrx * resx;
+
+	if (outy)
+		*outy = ctry * resy;
+
+	if (outrad)
+		*outrad = rad;
+	ret = 1;
+
+#ifdef DEBUG_CENTER
+	/* hide all pixels that are not boundaries */
+	for (y = 0; y < img->h; y++) {
+		if (minx[y] == -1)
+			continue;
+		for (x = minx[y] + 1; x <= maxx[y] - 1; x++)
+			if (y > miny[x] && y < maxy[x])
+				img->work[y * img->w + x] = 0;
+	}
+
+	/* mark remaining pixels (2 per x, 2 per y) */
+	for (y = 0; y < img->h; y++) {
+		for (x = 0; x < img->w; x++)
+			if (img->work[y * img->w + x] > 0) {
+				img->work[y * img->w + x] = 1.0;
+			}
+	}
+
+	/* mark the initial center */
+	img->work[ctry * img->w + ctrx] = 0.5;
+#endif
+
+ done:
+	free(radius);
+	free(pts);
+	free(maxy); free(miny);
+	free(maxx); free(minx);
+	return ret;
 }
 
 /* apply transformations starting at <xfrm> to image <img>. Return non-zero on
@@ -692,6 +888,8 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 	fprintf(file, "; Generated by png2gcode\n");
 	fprintf(file, "; Original image size: %ux%u pixels, %.7gx%.7g mm\n", img->w, img->h, img->mmw, img->mmh);
 	fprintf(file, "; Work area: %.7g,%.7g -> %.7g,%.7g mm\n", img->orgx, img->orgy, img->orgx+img->mmw, img->orgy+img->mmh);
+	if (img->diam > 0)
+		fprintf(file, "; Center: 0,0, Max radius: %.7g mm, Diameter: %.7g mm\n", img->diam / 2, img->diam);
 	fprintf(file, "; Total of %d passes\n", pass_cnt);
 	if (argc > 0) {
 		int a;
@@ -1039,6 +1237,8 @@ int main(int argc, char **argv)
 				center_mode = OUT_CNT_NONE;
 			else if (strcmp(optarg, "A") == 0)
 				center_mode = OUT_CNT_AXIS;
+			else if (strcmp(optarg, "C") == 0)
+				center_mode = OUT_CNT_CIRC;
 			else
 				die(1, "unsupported centering mode %s\n", optarg);
 			break;
@@ -1158,6 +1358,13 @@ int main(int argc, char **argv)
 	else
 		img.mmw = 0;
 
+	if (fmt == OUT_FMT_GCODE && (!img.mmh || !img.mmw))
+		die(1, "output image width/height are mandatory in G-CODE output\n");
+
+	if (!gray_to_work(&img))
+		die(3, "failed to convert image to work\n");
+
+	img.diam = 0;
 	img.orgx = orgx;
 	img.orgy = orgy;
 
@@ -1165,12 +1372,15 @@ int main(int argc, char **argv)
 		img.orgx = -img.mmw / 2;
 		img.orgy = -img.mmh / 2;
 	}
+	else if (center_mode == OUT_CNT_CIRC) {
+		float ctrx, ctry, rad;
 
-	if (fmt == OUT_FMT_GCODE && (!img.mmh || !img.mmw))
-		die(1, "output image width/height are mandatory in G-CODE output\n");
-
-	if (!gray_to_work(&img))
-		die(3, "failed to convert image to work\n");
+		if (find_center(&img, &ctrx, &ctry, &rad)) {
+			img.orgx = -ctrx;
+			img.orgy = -ctry;
+			img.diam = 2 * rad;
+		}
+	}
 
 	if (xfrm && !xfrm_apply(&img, xfrm))
 		die(6, "failed to apply one transformation to the image\n");
