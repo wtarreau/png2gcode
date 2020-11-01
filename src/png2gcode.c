@@ -381,6 +381,23 @@ int work_to_gray(struct image *img)
 		for (x = 0; x < img->w; x++) {
 			uint32_t p = y * img->w + x;
 			float    v = img->work[p];
+			float d = material.diffusion;
+			float d2 = 2*d*d;
+
+			/* quadratic distance effect hence 2*d^2 for diagonal
+			 * since it spreads through two adjacent pixels. Also
+			 * don't count current pixel.
+			 */
+			v += get_pix(img, x - 1, y - 1) * d2;
+			v += get_pix(img, x + 0, y - 1) * d;
+			v += get_pix(img, x + 1, y - 1) * d2;
+
+			v += get_pix(img, x - 1, y) * d;
+			v += get_pix(img, x + 1, y) * d;
+
+			v += get_pix(img, x - 1, y + 1) * d2;
+			v += get_pix(img, x + 0, y + 1) * d;
+			v += get_pix(img, x + 1, y + 1) * d2;
 
 			v = 255 * (1.0 - v);
 			if (v < 0)
