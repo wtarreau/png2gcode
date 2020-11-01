@@ -705,8 +705,28 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 				return 0;
 
 			for (y = 0; y < img->h; y++)
-				for (x = 0; x < img->w; x++)
-					soften[y * img->w + x] = get_pix(img, x & ~1, y) + get_pix(img, x | 1, y);
+				for (x = 0; x < img->w; x++) {
+					float v = 0.0;
+					float d = material.diffusion;
+					float d2 = 2*d*d;
+
+					/* quadratic distance effect hence 2*d^2 for diagonal
+					 * since it spreads through two adjacent pixels. Also
+					 * don't count current pixel.
+					 */
+					v += get_pix(img, x - 1, y - 1) * d2;
+					v += get_pix(img, x + 0, y - 1) * d;
+					v += get_pix(img, x + 1, y - 1) * d2;
+
+					v += get_pix(img, x - 1, y) * d;
+					v += get_pix(img, x + 1, y) * d;
+
+					v += get_pix(img, x - 1, y + 1) * d2;
+					v += get_pix(img, x + 0, y + 1) * d;
+					v += get_pix(img, x + 1, y + 1) * d2;
+
+					soften[y * img->w + x] = get_pix(img, x & ~1, y) + get_pix(img, x | 1, y) - v / 2;
+				}
 		}
 		else if (xfrm->op == XFRM_NORMALIZE) {
 			for (y = 0; y < img->h; y++) {
