@@ -167,6 +167,24 @@ double f4(double f)
 	return f;
 }
 
+/* returns the pixel intensity at <x,y> or 0 if outside of the viewing area */
+float get_pix(const struct image *img, uint32_t x, uint32_t y)
+{
+	if (y >= img->h)
+		return 0;
+	if (x >= img->w)
+		return 0;
+	return img->work[y * img->w + x];
+}
+
+/* computes the square of the distance between points 1 and 2 */
+float sqdist(uint32_t x1, uint32_t y1, uint32_t x2, uint32_t y2, float resx, float resy)
+{
+	resx *= (int)(x2 - x1);
+	resy *= (int)(y2 - y1);
+	return resx * resx + resy * resy;
+}
+
 void usage(int code, const char *cmd)
 {
 	die(code,
@@ -431,24 +449,6 @@ struct xfrm *xfrm_new(struct xfrm *curr, enum xfrm_op op, float arg)
 	if (curr)
 		curr->next = new;
 	return new;
-}
-
-/* returns the pixel intensity at <x,y> or 0 if outside of the viewing area */
-float get_pix(const struct image *img, uint32_t x, uint32_t y)
-{
-	if (y >= img->h)
-		return 0;
-	if (x >= img->w)
-		return 0;
-	return img->work[y * img->w + x];
-}
-
-/* computes the square of the distance between points 1 and 2 */
-float sqdist(uint32_t x1, uint32_t y1, uint32_t x2, uint32_t y2, float resx, float resy)
-{
-	resx *= (int)(x2 - x1);
-	resy *= (int)(y2 - y1);
-	return resx * resx + resy * resy;
 }
 
 /* try to figure the center of the smallest circle including all pixels,
