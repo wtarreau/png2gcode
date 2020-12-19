@@ -124,6 +124,7 @@ enum pass_mode {
 	PASS_MODE_FRAME,      // move over the frame countour
 	PASS_MODE_RASTER,     // raster image, bidirectional
 	PASS_MODE_RASTER_LR,  // raster image left-to-right only
+	PASS_MODE_CONTOUR,    // move along the image's countour
 	PASS_MODES            // must be last one
 };
 
@@ -136,6 +137,7 @@ const char *pass_mode_names[PASS_MODES] = {
 	[PASS_MODE_FRAME]     = "frame",
 	[PASS_MODE_RASTER]    = "raster",
 	[PASS_MODE_RASTER_LR] = "raster-lr",
+	[PASS_MODE_CONTOUR]   = "contour",
 };
 
 struct pass {
@@ -170,6 +172,26 @@ double f4(double f)
 {
 	f = nearbyint(f * 10000.0) / 10000.0;
 	return f;
+}
+
+/* returns the real X for an image from a dot position */
+double imgxr(const struct image *img, int x)
+{
+	double xr;
+
+	xr = x * img->mmw / img->w;
+	xr = roundf(xr * 1000.0) / 1000.0;
+	return xr;
+}
+
+/* returns the real Y for an image from a dot position */
+double imgyr(const struct image *img, int y)
+{
+	double yr;
+
+	yr = y * img->mmh / img->h;
+	yr = roundf(yr * 1000.0) / 1000.0;
+	return yr;
 }
 
 /* returns the pixel intensity at <x,y> or 0 if outside of the viewing area */
@@ -1002,10 +1024,10 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 			pass_num++;
 
 			if (base_feed < 0)
-				base_feed = (pass->mode == PASS_MODE_RASTER || pass->mode == PASS_MODE_RASTER_LR) ?
+				base_feed = (pass->mode == PASS_MODE_RASTER || pass->mode == PASS_MODE_RASTER_LR || pass->mode == PASS_MODE_CONTOUR) ?
 					DEFAULT_FEED_RASTER : DEFAULT_FEED_SHOW;
 			if (base_spindle < 0)
-				base_spindle = (pass->mode == PASS_MODE_RASTER || pass->mode == PASS_MODE_RASTER_LR) ?
+				base_spindle = (pass->mode == PASS_MODE_RASTER || pass->mode == PASS_MODE_RASTER_LR || pass->mode == PASS_MODE_CONTOUR) ?
 					DEFAULT_SPINDLE_RASTER : DEFAULT_SPINDLE_SHOW;
 
 			fprintf(file, "; pass %d-%d/%d : mode=%s spindle=%d feed=%d\n",
@@ -1044,6 +1066,101 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 					base_spindle, f4(img->orgx), f4(img->orgy), base_feed,
 					f4(img->orgy+img->mmh), f4(img->orgx+img->mmw),
 					f4(img->orgy), f4(img->orgx));
+			}
+			else if (pass->mode == PASS_MODE_CONTOUR) {
+				int lx, ly, rx, ry; /* left x,y; right x,y */
+				int x, y;
+				int cx;
+
+				/* In order to draw the contour, we have 5 steps:
+				 *   - spot leftmost, bottom pixel
+				 *   - climb on the left
+				 *   - spot rightmost, top pixel
+				 *   - go down on the right
+				 *   - draw to first pixel
+				 */
+
+				lx = ly = rx = ry = -1;
+
+				/* spot leftmost dot */
+				for (y = 0; ly == -1 && y < img->h; y++) {
+					for (x = 0; x < img->w; x++) {
+						if (img->work[y * img->w + x]) {
+							lx = x;
+							ly = y;
+							break;
+						}
+					}
+				}
+
+				/* spot rightmost dot */
+				for (y = img->h - 1; ry == -1 && y >= 0; y--) {
+					for (x = img->w - 1; x >= 0; x--) {
+						if (img->work[y * img->w + x]) {
+							rx = x;
+							ry = y;
+							break;
+						}
+					}
+				}
+
+				if (lx < 0 || rx < 0) {
+					fprintf(file, "(empty image)\n");
+					goto contour_end;
+				}
+
+				/* OK, start from left */
+				fprintf(file, "G0 X%.7g Y%.7g\nM4 S%d\nG1 F%d\n",
+					f4(img->orgx + imgxr(img, lx)),
+					f4(img->orgy + imgyr(img, ly)),
+					base_spindle,
+					base_feed);
+
+				cx = lx;
+				for (y = ly + 1; y <= ry; y++) {
+					for (x = 0; x < img->w; x++) {
+						if (img->work[y * img->w + x])
+							break;
+					}
+
+					if (x == img->w)
+						continue;
+
+					if (x != cx)
+						fprintf(file, "X%.7g ", f4(img->orgx + imgxr(img, x)));
+					fprintf(file, "Y%.7g\n", f4(img->orgy + imgyr(img, y)));
+					cx = x;
+				}
+
+				/* go top right */
+				fprintf(file, "X%.7g Y%.7g\n",
+					f4(img->orgx + imgxr(img, rx)),
+					f4(img->orgy + imgyr(img, ry)));
+
+				/* go down on the right */
+				cx = rx;
+				for (y = ry - 1; y >= ly; y--) {
+					for (x = img->w - 1; x >= 0; x--) {
+						if (img->work[y * img->w + x])
+							break;
+					}
+
+					if (x < 0)
+						continue;
+
+					if (x != cx)
+						fprintf(file, "X%.7g ", f4(img->orgx + imgxr(img, x)));
+					fprintf(file, "Y%.7g\n", f4(img->orgy + imgyr(img, y)));
+					cx = x;
+				}
+
+				/* go bottom left */
+				fprintf(file, "X%.7g Y%.7g\n",
+					f4(img->orgx + imgxr(img, lx)),
+					f4(img->orgy + imgyr(img, ly)));
+
+			contour_end:
+				fprintf(file, "M5 S0\nG0 X0 Y0\n");
 			}
 			else if (pass->mode == PASS_MODE_RASTER || pass->mode == PASS_MODE_RASTER_LR) {
 				uint32_t curr_spindle;
