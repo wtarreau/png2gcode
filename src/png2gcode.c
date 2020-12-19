@@ -121,7 +121,7 @@ enum pass_mode {
 	PASS_MODE_Y,          // move over the Y axis
 	PASS_MODE_AXIS,       // move over the X then the Y axis
 	PASS_MODE_DIAG,       // move over the diagonal
-	PASS_MODE_CONTOUR,    // move over the contour
+	PASS_MODE_FRAME,      // move over the frame countour
 	PASS_MODE_RASTER,     // raster image, bidirectional
 	PASS_MODE_RASTER_LR,  // raster image left-to-right only
 	PASS_MODES            // must be last one
@@ -133,7 +133,7 @@ const char *pass_mode_names[PASS_MODES] = {
 	[PASS_MODE_Y]         = "y",
 	[PASS_MODE_AXIS]      = "axis",
 	[PASS_MODE_DIAG]      = "diag",
-	[PASS_MODE_CONTOUR]   =  "contour",
+	[PASS_MODE_FRAME]     = "frame",
 	[PASS_MODE_RASTER]    = "raster",
 	[PASS_MODE_RASTER_LR] = "raster-lr",
 };
@@ -222,8 +222,8 @@ void usage(int code, const char *cmd)
 	    "  -Q --qfreq <levels>          quantize to <levels> levels based on frequency\n"
 	    "     --soften <value>          subtract neighbors' average times <value>\n"
 	    "Passes are used in G-CODE output format (-f gcode):\n"
-	    "  -M --mode    <mode>          pass mode (origin,x,y,axis,diag,contour,raster,raster-lr)\n"
-	    "  -F --feed    <value>         feed rate (mm/min, def:4800 contour, 1200 raster)\n"
+	    "  -M --mode    <mode>          pass mode (origin,x,y,axis,diag,frame,raster,raster-lr)\n"
+	    "  -F --feed    <value>         feed rate (mm/min, def:4800 frame, 1200 raster)\n"
 	    "  -S --spindle <value>         spindle value for intensity 1.0 (def:1 or 255)\n"
 	    "  -P --passes  <value>         number of passes with previous parameters (def:1)\n"
 	    "Material characteristics:\n"
@@ -1034,7 +1034,7 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 					f4(img->orgx+img->mmw), f4(img->orgy+img->mmh),
 					f4(img->orgx), f4(img->orgy));
 			}
-			else if (pass->mode == PASS_MODE_CONTOUR) {
+			else if (pass->mode == PASS_MODE_FRAME) {
 				fprintf(file, "M4 S%d\nG0 X%.7g Y%.7g\nG1 F%d\n"
 					"G1 Y%.7g\n"
 					"G1 X%.7g\n"
