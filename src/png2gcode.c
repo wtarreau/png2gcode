@@ -1143,6 +1143,8 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 							f4(img->orgx+roundf(x * img->mmw / img->w * 1000.0) / 1000.0),
 							curr_spindle);
 				}
+				// make sure not to draw lines between passes
+				fprintf(file, "M5 S0\nG0\n");
 			}
 		}
 	}
