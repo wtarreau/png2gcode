@@ -25,7 +25,10 @@ struct image {
 	float orgy;    // image vertical origin in millimeters
 	float mmw;     // image width in millimiters
 	float mmh;     // image height in millimeters
-	float diam;    // max computed diameter (if -cC) or zero
+	float diam;    // max computed diameter (if -cC) or zer
+	uint8_t crop_threshold; // crop above this value
+	uint32_t minx, maxx;
+	uint32_t miny, maxy;
 };
 
 enum out_fmt {
@@ -45,6 +48,7 @@ enum opt {
 	OPT_CROP_LEFT,
 	OPT_CROP_RIGHT,
 	OPT_CROP_TOP,
+	OPT_AUTO_CROP,
 	OPT_SOFTEN,
 	OPT_IMGW,
 	OPT_IMGH,
@@ -79,6 +83,7 @@ const struct option long_options[] = {
 	{"crop-left",   required_argument, 0, OPT_CROP_LEFT    },
 	{"crop-right",  required_argument, 0, OPT_CROP_RIGHT   },
 	{"crop-top",    required_argument, 0, OPT_CROP_TOP     },
+	{"auto-crop",   required_argument, 0, OPT_AUTO_CROP    },
 	{"image-width", required_argument, 0, OPT_IMGW         },
 	{"image-height",required_argument, 0, OPT_IMGH         },
 	{"orig-x",      required_argument, 0, OPT_ORGX         },
@@ -192,11 +197,12 @@ void usage(int code, const char *cmd)
 	    "  -h --help                    show this help\n"
 	    "  -f --fmt <format>            output format (png, gcode), defaults to file ext\n"
 	    "  -i --in <file>               input PNG file name\n"
-	    "  -o --out <file>              output file name\n"
+	    "     --auto-crop <threshold%%>  automatic crop of input image (suggested: 95%%)\n"
 	    "     --crop-bottom <size>      crop this number of pixels from the bottom\n"
 	    "     --crop-left   <size>      crop this number of pixels from the left\n"
 	    "     --crop-right  <size>      crop this number of pixels from the right\n"
 	    "     --crop-top    <size>      crop this number of pixels from the top\n"
+	    "  -o --out <file>              output file name\n"
 	    "     --image-width  <size>     image width in millimeters (default: automatic)\n"
 	    "     --image-height <size>     image height in millimeters (default: automatic)\n"
 	    "     --orig-x       <pos>      X origin position in millimeters (default: 0.0)\n"
@@ -248,6 +254,7 @@ int read_rgba_file(const char *file, struct image *img)
 	/* process all images as RGBA so that we can turn transparent into white*/
 	png_image.format  = PNG_FORMAT_RGBA;
 
+	img->crop_threshold = 255;
 	img->w = png_image.width;
 	img->h = png_image.height;
 	img->rgba = malloc(PNG_IMAGE_SIZE(png_image));
@@ -304,6 +311,7 @@ int write_gray_file(const char *file, struct image *img)
 int rgba_to_gray(struct image *img)
 {
 	uint32_t x, y;
+	uint32_t minx, maxx, miny, maxy;
 
 	if (!img->rgba)
 		return 0;
@@ -311,6 +319,9 @@ int rgba_to_gray(struct image *img)
 	img->gray = malloc(img->w * img->h * sizeof(*img->gray));
 	if (!img->gray)
 		return 0;
+
+	maxx = 0; minx = img->w - 1;
+	maxy = 0; miny = img->h - 1;
 
 	for (y = 0; y < img->h; y++) {
 		for (x = 0; x < img->w; x++) {
@@ -325,8 +336,34 @@ int rgba_to_gray(struct image *img)
 			v = a * (r + g + b) + (255 - a) * (3 * 255);
 			v /= 3 * 255;
 			img->gray[y * img->w + x] = v;
+			if (v <= img->crop_threshold) {
+				if (x < minx)
+					minx = x;
+				if (x > maxx)
+					maxx = x;
+				if (y < miny)
+					miny = y;
+				if (y > maxy)
+					maxy = y;
+			}
 		}
 	}
+
+	/* if no pixel was found, do not crop */
+	if (minx > maxx) {
+		minx = 0;
+		maxx = img->w - 1;
+	}
+
+	if (miny > maxy) {
+		miny = 0;
+		maxy = img->h - 1;
+	}
+
+	img->minx = minx;
+	img->maxx = maxx;
+	img->miny = miny;
+	img->maxy = maxy;
 
 	free(img->rgba);
 	img->rgba = NULL;
@@ -1124,6 +1161,7 @@ int main(int argc, char **argv)
 {
 	float pixw = 0, pixh = 0, imgw = 0, imgh = 0, orgx = 0, orgy = 0;
 	int cropx0 = 0, cropy0 = 0, cropx1 = 0, cropy1 = 0;
+	uint32_t arg_auto_crop = 0;
 	enum out_center center_mode = OUT_CNT_NONE;
 	enum out_fmt fmt = OUT_FMT_NONE;
 	struct pass *curr_pass = NULL;
@@ -1144,6 +1182,10 @@ int main(int argc, char **argv)
 
 		switch (c) {
 		case 0: /* long option: long_options[option_index] with arg <optarg> */
+			break;
+
+		case OPT_AUTO_CROP:
+			arg_auto_crop = atoi(optarg);
 			break;
 
 		case OPT_CROP_BOTTOM:
@@ -1384,8 +1426,18 @@ int main(int argc, char **argv)
 	if (!read_rgba_file(in, &img))
 		die(2, "failed to read file %s\n", in);
 
+	if (arg_auto_crop)
+		img.crop_threshold = (uint32_t)255 * arg_auto_crop / 100;
+
 	if (!rgba_to_gray(&img))
 		die(3, "failed to convert image to gray\n");
+
+	if (arg_auto_crop) {
+		cropx0 = img.minx ? img.minx - 1 : 0;
+		cropx1 = (img.maxx < img.w - 1) ? img.w - 2 - img.maxx : 0;
+		cropy0 = img.miny ? img.miny - 1 : 0;
+		cropy1 = (img.maxy < img.h - 1) ? img.h - 2 - img.maxy : 0;
+	}
 
 	if ((cropx0 || cropy0 || cropx1 || cropy1) &&
 	    !crop_gray_image(&img, cropx0, cropy0, img.w - 1 - cropx1, img.h - 1 - cropy1))
