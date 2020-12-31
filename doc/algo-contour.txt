@@ -1,0 +1,43 @@
+2020-12-31 - contour tracing algorithm
+
+Modelized and tested by hand using xfig and polygons.
+
+The principle is to define a list of points between which lines will be drawn
+and to add as many points as needed to make the lines closer to the artwork.
+
+We start with 4 points corresponding to the image's 4 corners. It is guaranteed
+that the artowrk is inside. These points are stored as a list in clockwise
+order.
+
+Then we start from the top left corner. We iteratively make it run over the
+line towards its predecessor (the bottom left one), pixel by pixel, each time
+checking that the minimal distance to the artwork is respected along the line
+to the successor (the one that moves). As soon as the minimal distance is not
+met anymore, the first location along that line from the current point to the
+successor showing the smallest distance will receive a new point (i.e. a pivot
+point) just after the current one, effectively becoming it successor. And the
+operation repeats trying to make the current point go closer to its predecessor
+until either it merges with it, at which point it is eliminated, or it gets
+itself close enough that it cannot be moved anymore. Then the job continues
+with the next point (likely the last inserted one). The operations end once
+all points are as close as possible to the artwork.
+
+Improvements:
+
+Thanks to the strict ordering, it's possible to know which side of a segment is
+inside and which side is outside (when the successor is on the right, the image
+is below, when it's above, the image is on the right, when it's on the left,
+the image is above and when it's on the right, the image is on the left). This
+allows to limit the search area if a large margin is desired. In addition this
+allows to support a notion of pressure, to present compressed curves instead of
+straight lines between two points forming a bridge. In this case it is possible
+to decide to add points in the middle of two existing ones on the inner side by
+accepting to extend the total length by up to N% pixels as long as the
+stretching saves a number of pixels that represents a percentage of this line's
+length. This will effectively model the impact of external air pressure which
+stretches the material used to surround the material if the material were to
+being vaccumed. Probably that in order to handle more complex shapes, a scan
+along the lines to figure the possible stretching points instead of focusing
+on the middle will work better (e.g. while surrounding a capital 'M' letter
+would work well with this algorithm, it would not work for a lowercase 'm' due
+to the middle leg).
