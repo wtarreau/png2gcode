@@ -58,6 +58,7 @@ enum opt {
 	OPT_PIXW,
 	OPT_PIXH,
 	OPT_PIXS,
+	OPT_RL_SHIFT,
 };
 
 const struct option long_options[] = {
@@ -93,6 +94,7 @@ const struct option long_options[] = {
 	{"pixel-width", required_argument, 0, OPT_PIXW         },
 	{"pixel-height",required_argument, 0, OPT_PIXH         },
 	{"pixel-size",  required_argument, 0, OPT_PIXS         },
+	{"rl-shift",    required_argument, 0, OPT_RL_SHIFT     },
 	{0,             0,                 0, 0                }
 };
 
@@ -154,6 +156,12 @@ struct material {
 	float diffusion;
 } material = {
 	      .diffusion = 0.18,  // 18% in each direction for each step results in 100 spread in 8 pixels
+};
+
+struct machine {
+	float rl_shift;           // offset to add to R->L paths in raster mode to compensate for machine imprecision
+} machine = {
+	     .rl_shift = -0.05,
 };
 
 /* display the message and exit with the code */
@@ -253,6 +261,8 @@ void usage(int code, const char *cmd)
 	    "  -P --passes  <value>         number of passes with previous parameters (def:1)\n"
 	    "Material characteristics:\n"
 	    "  -d --diffuse <ratio>         adjacent radiation for hash & soften (def:0.18)\n"
+	    "Machine settings:\n"
+	    "     --rl-shift <millimeters>  offset to apply to R->L path in raster mode (def:-0.05)\n"
 	    "Notes:\n"
 	    "  - for images, use -H for wood or -t on aluminum\n"
 	    "", cmd);
@@ -1268,14 +1278,14 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 						xr = x * img->mmw / img->w;
 						xr = roundf(xr * 1000.0) / 1000.0;
 						if (!curr_spindle && (!x0 || ymoved || x0 - x > 20)) {
-							fprintf(file, "G0 X%.7g", f4(img->orgx+xr)); // no lf here, at least one X will follow
+							fprintf(file, "G0 X%.7g", f4(img->orgx+xr+machine.rl_shift)); // no lf here, at least one X will follow
 							if (ymoved) {
 								ymoved = 0;
 								fprintf(file, " Y%.7g", f4(img->orgy+yr)); // no lf here, at least one X will follow
 							}
 							fprintf(file, "\nG1 "); // no lf here, at least one X will follow
 						} else
-							fprintf(file, "X%.7g S%d\n", f4(img->orgx+xr), curr_spindle);
+							fprintf(file, "X%.7g S%d\n", f4(img->orgx+xr+machine.rl_shift), curr_spindle);
 
 						curr_spindle = spindle;
 						if (!spindle)
@@ -1284,7 +1294,7 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 					/* trace last pixels */
 					if (curr_spindle)
 						fprintf(file, "X%.7g S%d\n",
-							f4(img->orgx+roundf(x * img->mmw / img->w * 1000.0) / 1000.0),
+							f4(img->orgx+machine.rl_shift+roundf(x * img->mmw / img->w * 1000.0) / 1000.0),
 							curr_spindle);
 				}
 				// make sure not to draw lines between passes
@@ -1388,6 +1398,10 @@ int main(int argc, char **argv)
 
 		case OPT_PIXS:
 			pixh = pixw = atof(optarg);
+			break;
+
+		case OPT_RL_SHIFT:
+			machine.rl_shift = atof(optarg);
 			break;
 
 		case 'a':
