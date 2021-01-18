@@ -1199,6 +1199,16 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 				 * may be merged with subsequent zeroes. We try to identify
 				 * longest lines with same output value and move the beam at
 				 * once over them. G0 is used for long zero areas (> 20px).
+				 * Note that we don't emit dots but segments. See them as
+				 * 1cm-wide segments for an easier representation. Eg:
+				 *
+				 *    0   1   2   3   4   5   6   7   8   9  <-- px number
+				 *  |---|---|---|---|---|---|---|---|---|---|
+				 *  0   1   2   3   4   5   6   7   8   9  10 <-- X position
+				 *
+				 * There is a "from" and a "to" location for each. In L->R
+				 * direction, "from" is the previous x (or x0) and "to" is
+				 * x. In R->L, the spindle is given by pixel x-1.
 				 */
 				for (y = 0; y < img->h; y++) {
 					/* first pass, left to right */
@@ -1251,8 +1261,8 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 
 					curr_spindle = 0;
 					x0 = 0;
-					for (x = img->w; x-- > 0; ) {
-						uint32_t spindle = img->work[y * img->w + x] * base_spindle;
+					for (x = img->w; x > 0; x--) {
+						uint32_t spindle = img->work[y * img->w + x - 1] * base_spindle;
 						if (spindle == curr_spindle)
 							continue;
 						xr = x * img->mmw / img->w;
@@ -1269,7 +1279,7 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 
 						curr_spindle = spindle;
 						if (!spindle)
-							x0 = x + 1;
+							x0 = x;
 					}
 					/* trace last pixels */
 					if (curr_spindle)
