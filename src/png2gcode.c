@@ -59,6 +59,7 @@ enum opt {
 	OPT_PIXH,
 	OPT_PIXS,
 	OPT_RL_SHIFT,
+	OPT_LASER_ON,
 };
 
 const struct option long_options[] = {
@@ -95,6 +96,7 @@ const struct option long_options[] = {
 	{"pixel-height",required_argument, 0, OPT_PIXH         },
 	{"pixel-size",  required_argument, 0, OPT_PIXS         },
 	{"rl-shift",    required_argument, 0, OPT_RL_SHIFT     },
+	{"laser-on",    required_argument, 0, OPT_LASER_ON     },
 	{0,             0,                 0, 0                }
 };
 
@@ -160,8 +162,10 @@ struct material {
 
 struct machine {
 	float rl_shift;           // offset to add to R->L paths in raster mode to compensate for machine imprecision
+	const char *laser_on;     // laser-on command
 } machine = {
 	     .rl_shift = -0.05,
+	     .laser_on = "M4",
 };
 
 /* display the message and exit with the code */
@@ -263,6 +267,7 @@ void usage(int code, const char *cmd)
 	    "  -d --diffuse <ratio>         adjacent radiation for hash & soften (def:0.18)\n"
 	    "Machine settings:\n"
 	    "     --rl-shift <millimeters>  offset to apply to R->L path in raster mode (def:-0.05)\n"
+	    "     --laser-on <cmd>          command to turn laser ON (def:M4)\n"
 	    "Notes:\n"
 	    "  - for images, use -H for wood or -t on aluminum\n"
 	    "", cmd);
@@ -1062,34 +1067,39 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 				pass_mode_names[pass->mode], base_spindle, base_feed);
 
 			if (pass->mode == PASS_MODE_X) {
-				fprintf(file, "M4 S%d\nG0 X%.7g Y%.7g\nG1 F%d\nG1 X%.7g\nG1 X%.7g\nM5 S0\n",
+				fprintf(file, "%s S%d\nG0 X%.7g Y%.7g\nG1 F%d\nG1 X%.7g\nG1 X%.7g\nM5 S0\n",
+					machine.laser_on,
 					base_spindle, f4(img->orgx), f4(img->orgy),
 					base_feed, f4(img->orgx+img->mmw), f4(img->orgx));
 			}
 			else if (pass->mode == PASS_MODE_Y) {
-				fprintf(file, "M4 S%d\nG0 X%.7g Y%.7g\nG1 F%d\nG1 Y%.7g\nG1 Y%.7g\nM5 S0\n",
+				fprintf(file, "%s S%d\nG0 X%.7g Y%.7g\nG1 F%d\nG1 Y%.7g\nG1 Y%.7g\nM5 S0\n",
+					machine.laser_on,
 					base_spindle, f4(img->orgx), f4(img->orgy),
 					base_feed, f4(img->orgy+img->mmh), f4(img->orgy));
 			}
 			else if (pass->mode == PASS_MODE_AXIS) {
-				fprintf(file, "M4 S%d\nG0 X%.7g Y%.7g\nG1 F%d\nG1 Y%.7g\nG1 Y%.7g\nG1 X%.7g\nG1 X%.7g\nM5 S0\n",
+				fprintf(file, "%s S%d\nG0 X%.7g Y%.7g\nG1 F%d\nG1 Y%.7g\nG1 Y%.7g\nG1 X%.7g\nG1 X%.7g\nM5 S0\n",
+					machine.laser_on,
 					base_spindle, f4(img->orgx), f4(img->orgy), base_feed,
 					f4(img->orgy+img->mmh), f4(img->orgy),
 					f4(img->orgx+img->mmw), f4(img->orgx));
 			}
 			else if (pass->mode == PASS_MODE_DIAG) {
-				fprintf(file, "M4 S%d\nG0 X%.7g Y%.7g\nG1 F%d\nG1 X%.7g Y%.7g\nG1 X%.7g Y%.7g\nM5 S0\n",
+				fprintf(file, "%s S%d\nG0 X%.7g Y%.7g\nG1 F%d\nG1 X%.7g Y%.7g\nG1 X%.7g Y%.7g\nM5 S0\n",
+					machine.laser_on,
 					base_spindle, f4(img->orgx), f4(img->orgy), base_feed,
 					f4(img->orgx+img->mmw), f4(img->orgy+img->mmh),
 					f4(img->orgx), f4(img->orgy));
 			}
 			else if (pass->mode == PASS_MODE_FRAME) {
-				fprintf(file, "M4 S%d\nG0 X%.7g Y%.7g\nG1 F%d\n"
+				fprintf(file, "%s S%d\nG0 X%.7g Y%.7g\nG1 F%d\n"
 					"G1 Y%.7g\n"
 					"G1 X%.7g\n"
 					"G1 Y%.7g\n"
 					"G1 X%.7g\n"
 					"M5 S0\n",
+					machine.laser_on,
 					base_spindle, f4(img->orgx), f4(img->orgy), base_feed,
 					f4(img->orgy+img->mmh), f4(img->orgx+img->mmw),
 					f4(img->orgy), f4(img->orgx));
@@ -1137,9 +1147,10 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 				}
 
 				/* OK, start from left */
-				fprintf(file, "G0 X%.7g Y%.7g\nM4 S%d\nG1 F%d\n",
+				fprintf(file, "G0 X%.7g Y%.7g\n%s S%d\nG1 F%d\n",
 					f4(img->orgx + imgxr(img, lx)),
 					f4(img->orgy + imgyr(img, ly)),
+					machine.laser_on,
 					base_spindle,
 					base_feed);
 
@@ -1195,7 +1206,8 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 				float xr, yr;   // real positions in millimeters
 				int ymoved;
 
-				fprintf(file, "M4 S%d\nG1 F%d\n",
+				fprintf(file, "%s S%d\nG1 F%d\n",
+					machine.laser_on,
 					base_spindle, base_feed);
 
 				/* principle: we move even lines from left to right and
@@ -1402,6 +1414,10 @@ int main(int argc, char **argv)
 
 		case OPT_RL_SHIFT:
 			machine.rl_shift = atof(optarg);
+			break;
+
+		case OPT_LASER_ON:
+			machine.laser_on = optarg;
 			break;
 
 		case 'a':
