@@ -229,6 +229,7 @@ float sqdist(uint32_t x1, uint32_t y1, uint32_t x2, uint32_t y2, float resx, flo
 void usage(int code, const char *cmd)
 {
 	die(code,
+	    "\n"
 	    "Usage: %s [options]* [transformations]* [passes]*\n"
 	    "  -h --help                    show this help\n"
 	    "  -f --fmt <format>            output format (png, gcode), defaults to file ext\n"
@@ -270,7 +271,7 @@ void usage(int code, const char *cmd)
 	    "     --laser-on <cmd>          command to turn laser ON (def:M4)\n"
 	    "Notes:\n"
 	    "  - for images, use -H for wood or -t on aluminum\n"
-	    "", cmd);
+	    "\n", cmd);
 }
 
 /* reads file <file> into rgba image <img>, which will be initialized. The image
@@ -1584,10 +1585,10 @@ int main(int argc, char **argv)
 		die(1, "unknown argument %s\n", argv[optind]);
 
 	if (!in)
-		die(1, "missing mandatory PNG input file name (-i file)\n");
+		die(1, "missing mandatory PNG input file name (-i file).\nUse -h for help.\n");
 
 	if (fmt == OUT_FMT_PNG && !out)
-		die(1, "missing mandatory PNG output file name (-o file)\n");
+		die(1, "missing mandatory PNG output file name (-o file).\nUse -h for help.\n");
 
 	if (fmt == OUT_FMT_NONE) {
 		if (!out ||
@@ -1597,7 +1598,7 @@ int main(int argc, char **argv)
 		else if (strlen(out) >= 4 && strcasecmp(out + strlen(out) - 4, ".png") == 0)
 			fmt = OUT_FMT_PNG;
 		else
-			die(1, "missing mandatory output format (-f png ?)\n");
+			die(1, "missing mandatory output format (-f png ?).\nUse -h for help.\n");
 	}
 
 	if ((imgw && pixw) || (imgh && pixh))
