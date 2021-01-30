@@ -60,6 +60,7 @@ enum opt {
 	OPT_PIXS,
 	OPT_RL_SHIFT,
 	OPT_LASER_ON,
+	OPT_TEST,
 };
 
 const struct option long_options[] = {
@@ -97,6 +98,7 @@ const struct option long_options[] = {
 	{"pixel-size",  required_argument, 0, OPT_PIXS         },
 	{"rl-shift",    required_argument, 0, OPT_RL_SHIFT     },
 	{"laser-on",    required_argument, 0, OPT_LASER_ON     },
+	{"test",        required_argument, 0, OPT_TEST         },
 	{0,             0,                 0, 0                }
 };
 
@@ -239,6 +241,7 @@ void usage(int code, const char *cmd)
 	    "     --crop-left   <size>      crop this number of pixels from the left\n"
 	    "     --crop-right  <size>      crop this number of pixels from the right\n"
 	    "     --crop-top    <size>      crop this number of pixels from the top\n"
+	    "     --test <size>             generate a test pattern this size instead of input\n"
 	    "  -o --out <file>              output file name\n"
 	    "     --image-width  <size>     image width in millimeters (default: automatic)\n"
 	    "     --image-height <size>     image height in millimeters (default: automatic)\n"
@@ -310,6 +313,40 @@ int read_rgba_file(const char *file, struct image *img)
  fail:
 	free(img->rgba);
 	return 0;
+}
+
+/* generate a test pattern <w> pixels wide and <h> pixels high.
+ * Returns non-zero on sucess, or 0 on failure, in which case the contents of
+ * <img> remains undefined.
+ */
+int generate_test_pattern(struct image *img, uint32_t w, uint32_t h)
+{
+	uint32_t x, y, v;
+
+	memset(img, 0, sizeof(*img));
+
+	img->crop_threshold = 255;
+	img->w = w;
+	img->h = h;
+
+	img->gray = malloc(img->w * img->h * sizeof(*img->gray));
+	if (!img->gray)
+		return 0;
+
+	for (y = 0; y < img->h; y++) {
+		for (x = 0; x < img->w; x++) {
+			v = (x ^ y) & 1;
+			v *= 255;
+			img->gray[y * img->w + x] = v;
+		}
+	}
+
+	img->minx = 0;
+	img->maxx = img->w - 1;
+	img->miny = 0;
+	img->maxy = img->h - 1;
+
+	return 1;
 }
 
 /* free all buffers in image <img> */
@@ -1329,7 +1366,7 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 int main(int argc, char **argv)
 {
 	float pixw = 0, pixh = 0, imgw = 0, imgh = 0, imgd = 0, orgx = 0, orgy = 0;
-	int cropx0 = 0, cropy0 = 0, cropx1 = 0, cropy1 = 0;
+	int cropx0 = 0, cropy0 = 0, cropx1 = 0, cropy1 = 0, test_sz = 0;
 	uint32_t arg_auto_crop = 0;
 	enum out_center center_mode = OUT_CNT_NONE;
 	enum out_fmt fmt = OUT_FMT_NONE;
@@ -1419,6 +1456,10 @@ int main(int argc, char **argv)
 
 		case OPT_LASER_ON:
 			machine.laser_on = optarg;
+			break;
+
+		case OPT_TEST:
+			test_sz = atoi(optarg);
 			break;
 
 		case 'a':
@@ -1587,7 +1628,7 @@ int main(int argc, char **argv)
 	if (optind < argc)
 		die(1, "unknown argument %s\n", argv[optind]);
 
-	if (!in)
+	if (!in && !test_sz)
 		die(1, "missing mandatory PNG input file name (-i file).\nUse -h for help.\n");
 
 	if (fmt == OUT_FMT_PNG && !out)
@@ -1610,14 +1651,20 @@ int main(int argc, char **argv)
 	if ((imgw || imgh) && imgd)
 		die(1, "not possible to set both image dimensions and diameter\n");
 
-	if (!read_rgba_file(in, &img))
-		die(2, "failed to read file %s\n", in);
+	if (test_sz) {
+		/* generate a test pattern this size */
+		if (!generate_test_pattern(&img, test_sz, test_sz))
+			die(2, "failed to generate test pattern.\n");
+	} else {
+		if (!read_rgba_file(in, &img))
+			die(2, "failed to read file %s\n", in);
 
-	if (arg_auto_crop)
-		img.crop_threshold = (uint32_t)255 * arg_auto_crop / 100;
+		if (arg_auto_crop)
+			img.crop_threshold = (uint32_t)255 * arg_auto_crop / 100;
 
-	if (!rgba_to_gray(&img))
-		die(3, "failed to convert image to gray\n");
+		if (!rgba_to_gray(&img))
+			die(3, "failed to convert image to gray\n");
+	}
 
 	if (arg_auto_crop) {
 		cropx0 = img.minx ? img.minx - 1 : 0;
