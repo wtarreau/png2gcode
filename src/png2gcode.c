@@ -1578,6 +1578,9 @@ int main(int argc, char **argv)
 			last_pass = curr_pass;
 			curr_pass = NULL;
 			break;
+		case ':': /* missing argument */
+		case '?': /* unknown option */
+			die(1, "");
 		}
 	}
 
