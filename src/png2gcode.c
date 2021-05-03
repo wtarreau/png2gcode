@@ -76,6 +76,7 @@ const struct option long_options[] = {
 	{"twins",       no_argument,       0, 't'              },
 	{"diffuse",     required_argument, 0, 'd'              },
 	{"normalize",   no_argument,       0, 'n'              },
+	{"raw-preview", no_argument,       0, 'r'              },
 	{"quantize",    required_argument, 0, 'q'              },
 	{"qfreq",       required_argument, 0, 'Q'              },
 	{"mode",        required_argument, 0, 'M'              },
@@ -235,6 +236,7 @@ void usage(int code, const char *cmd)
 	    "Usage: %s [options]* [transformations]* [passes]*\n"
 	    "  -h --help                    show this help\n"
 	    "  -f --fmt <format>            output format (png, gcode), defaults to file ext\n"
+	    "  -r --raw-preview             make the PNG output match exactly the laser dot intensity\n"
 	    "  -i --in <file>               input PNG file name\n"
 	    "     --auto-crop <threshold%%>  automatic crop of input image (suggested: 95%%)\n"
 	    "     --crop-bottom <size>      crop this number of pixels from the bottom\n"
@@ -479,9 +481,12 @@ int gray_to_work(struct image *img)
 /* convert image <img> from work to gray. Signal strengths 0.0 and lower are
  * turned to white, and strengths 1.0 and higher are turned to black. The gray
  * buffer will be allocated and the work buffer will be freed. Non-zero is
- * returned on success, zero on error.
+ * returned on success, zero on error. If <raw> is non-zero, the exact laser
+ * dot intensity is reported for each pixel, otherwise the previous considers
+ * the material's diffusion and tries to provide an estimate of what the output
+ * would look like.
  */
-int work_to_gray(struct image *img)
+int work_to_gray(struct image *img, int raw)
 {
 	uint32_t x, y;
 
@@ -503,17 +508,18 @@ int work_to_gray(struct image *img)
 			 * since it spreads through two adjacent pixels. Also
 			 * don't count current pixel.
 			 */
-			v += get_pix(img, x - 1, y - 1) * d2;
-			v += get_pix(img, x + 0, y - 1) * d;
-			v += get_pix(img, x + 1, y - 1) * d2;
+			if (!raw) {
+				v += get_pix(img, x - 1, y - 1) * d2;
+				v += get_pix(img, x + 0, y - 1) * d;
+				v += get_pix(img, x + 1, y - 1) * d2;
 
-			v += get_pix(img, x - 1, y) * d;
-			v += get_pix(img, x + 1, y) * d;
+				v += get_pix(img, x - 1, y) * d;
+				v += get_pix(img, x + 1, y) * d;
 
-			v += get_pix(img, x - 1, y + 1) * d2;
-			v += get_pix(img, x + 0, y + 1) * d;
-			v += get_pix(img, x + 1, y + 1) * d2;
-
+				v += get_pix(img, x - 1, y + 1) * d2;
+				v += get_pix(img, x + 0, y + 1) * d;
+				v += get_pix(img, x + 1, y + 1) * d2;
+			}
 			v = 255 * (1.0 - v);
 			if (v < 0)
 				v = 0;
@@ -1368,6 +1374,7 @@ int main(int argc, char **argv)
 	float pixw = 0, pixh = 0, imgw = 0, imgh = 0, imgd = 0, orgx = 0, orgy = 0;
 	int cropx0 = 0, cropy0 = 0, cropx1 = 0, cropy1 = 0, test_sz = 0;
 	uint32_t arg_auto_crop = 0;
+	int arg_raw_preview = 0;
 	enum out_center center_mode = OUT_CNT_NONE;
 	enum out_fmt fmt = OUT_FMT_NONE;
 	struct pass *curr_pass = NULL;
@@ -1381,7 +1388,7 @@ int main(int argc, char **argv)
 
 	while (1) {
 		int option_index = 0;
-		int c = getopt_long(argc, argv, "hi:o:c:f:a:g:m:q:Q:d:HtnM:S:F:P:", long_options, &option_index);
+		int c = getopt_long(argc, argv, "hi:o:c:f:a:g:m:q:Q:d:HtnrM:S:F:P:", long_options, &option_index);
 
 		if (c == -1)
 			break;
@@ -1619,6 +1626,9 @@ int main(int argc, char **argv)
 			last_pass = curr_pass;
 			curr_pass = NULL;
 			break;
+		case 'r':
+			arg_raw_preview = 1;
+			break;
 		case ':': /* missing argument */
 		case '?': /* unknown option */
 			die(1, "");
@@ -1725,7 +1735,7 @@ int main(int argc, char **argv)
 		die(6, "failed to apply one transformation to the image\n");
 
 	if (fmt == OUT_FMT_PNG) {
-		if (!work_to_gray(&img))
+		if (!work_to_gray(&img, arg_raw_preview))
 			die(3, "failed to convert image to gray\n");
 
 		if (!write_gray_file(out, &img))
