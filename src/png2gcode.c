@@ -83,6 +83,7 @@ const struct option long_options[] = {
 	{"feed",        required_argument, 0, 'F'              },
 	{"passes",      required_argument, 0, 'P'              },
 	{"spindle",     required_argument, 0, 'S'              },
+	{"beam-width",  required_argument, 0, 'w'              },
 	{"soften",      required_argument, 0, OPT_SOFTEN       },
 	{"crop-bottom", required_argument, 0, OPT_CROP_BOTTOM  },
 	{"crop-left",   required_argument, 0, OPT_CROP_LEFT    },
@@ -165,9 +166,11 @@ struct material {
 
 struct machine {
 	float rl_shift;           // offset to add to R->L paths in raster mode to compensate for machine imprecision
+	float beam_w;             // beam width in mm (limited to px size for now)
 	const char *laser_on;     // laser-on command
 } machine = {
 	     .rl_shift = -0.05,
+	     .beam_w   = 0,
 	     .laser_on = "M4",
 };
 
@@ -272,6 +275,7 @@ void usage(int code, const char *cmd)
 	    "Material characteristics:\n"
 	    "  -d --diffuse <ratio>         adjacent radiation for hash & soften (def:0.18)\n"
 	    "Machine settings:\n"
+	    "  -w --beam-width <mm>         beam width in millimeters (def: 0, max:90% pxw, neg=alt)\n"
 	    "     --rl-shift <millimeters>  offset to apply to R->L path in raster mode (def:-0.05)\n"
 	    "     --laser-on <cmd>          command to turn laser ON (def:M4)\n"
 	    "Notes:\n"
@@ -1046,6 +1050,7 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 	int pass_num = 0;
 	int pass_cnt = 0;
 	float pxw = img->mmw / img->w;
+	float br = fabs(machine.beam_w / 2.0); // beam radius
 
 	if (out) {
 		file = fopen(out, "w");
@@ -1249,6 +1254,7 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 				uint32_t curr_spindle;
 				unsigned int x, y, x0;
 				float xr, yr;   // real positions in millimeters
+				float beam_ofs;
 				int ymoved;
 
 				fprintf(file, "%s S%d\nG1 F%d\n",
@@ -1289,12 +1295,24 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 					x0 = 0;
 					for (x = 0; x < img->w; x++) {
 						uint32_t spindle = img->work[y * img->w + x] * base_spindle;
+
+						if (br > 0.0 && machine.beam_w < 0.0 && y & 1)
+							beam_ofs = br;
+						else
+							beam_ofs = 0.0;
+
+						xr = x * pxw;
+						if (br > 0.0 && curr_spindle) {
+							/* finish previous pixel to avoid a burn */
+							fprintf(file, "X%.7g S%d\n", f4(img->orgx+xr-br+beam_ofs), curr_spindle);
+							curr_spindle = 0;
+						}
+
 						if (spindle == curr_spindle)
 							continue;
-						xr = x * pxw;
 						xr = roundf(xr * 1000.0) / 1000.0;
 						if (!curr_spindle && (!x0 || ymoved || x - x0 > 20)) {
-							fprintf(file, "G0 X%.7g", f4(img->orgx+xr)); // no lf here, at least one X will follow
+							fprintf(file, "G0 X%.7g", f4(img->orgx+xr+br+beam_ofs)); // no lf here, at least one X will follow
 							if (ymoved) {
 								ymoved = 0;
 								fprintf(file, " Y%.7g", f4(img->orgy+yr)); // no lf here, at least one X will follow
@@ -1302,7 +1320,7 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 							fprintf(file, "\nG1 "); // no lf here, at least one X will follow
 						}
 						else
-							fprintf(file, "X%.7g S%d\n", f4(img->orgx+xr), curr_spindle);
+							fprintf(file, "X%.7g S%d\n", f4(img->orgx+xr+br+beam_ofs), curr_spindle);
 
 						curr_spindle = spindle;
 						if (!spindle)
@@ -1311,7 +1329,7 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 					/* trace last pixels */
 					if (curr_spindle)
 						fprintf(file, "X%.7g S%d\n",
-							f4(img->orgx+roundf(x * pxw * 1000.0) / 1000.0),
+							f4(img->orgx - br + beam_ofs + roundf(x * pxw* 1000.0) / 1000.0),
 							curr_spindle);
 
 					/* go back to left position if LR mode */
@@ -1330,19 +1348,31 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 					x0 = 0;
 					for (x = img->w; x > 0; x--) {
 						uint32_t spindle = img->work[y * img->w + x - 1] * base_spindle;
+
+						if (br > 0.0 && machine.beam_w < 0.0 && y & 1)
+							beam_ofs = br;
+						else
+							beam_ofs = 0.0;
+
+						xr = x * pxw;
+						if (br > 0.0 && curr_spindle) {
+							/* finish previous pixel to avoid a burn */
+							fprintf(file, "X%.7g S%d\n", f4(img->orgx+xr+machine.rl_shift+br+beam_ofs), curr_spindle);
+							curr_spindle = 0;
+						}
+
 						if (spindle == curr_spindle)
 							continue;
-						xr = x * pxw;
 						xr = roundf(xr * 1000.0) / 1000.0;
 						if (!curr_spindle && (!x0 || ymoved || x0 - x > 20)) {
-							fprintf(file, "G0 X%.7g", f4(img->orgx+xr+machine.rl_shift)); // no lf here, at least one X will follow
+							fprintf(file, "G0 X%.7g", f4(img->orgx+xr+machine.rl_shift-br)); // no lf here, at least one X will follow
 							if (ymoved) {
 								ymoved = 0;
 								fprintf(file, " Y%.7g", f4(img->orgy+yr)); // no lf here, at least one X will follow
 							}
 							fprintf(file, "\nG1 "); // no lf here, at least one X will follow
 						} else
-							fprintf(file, "X%.7g S%d\n", f4(img->orgx+xr+machine.rl_shift), curr_spindle);
+							fprintf(file, "X%.7g S%d\n", f4(img->orgx+xr+br+beam_ofs+machine.rl_shift), curr_spindle);
 
 						curr_spindle = spindle;
 						if (!spindle)
@@ -1351,7 +1381,7 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 					/* trace last pixels */
 					if (curr_spindle)
 						fprintf(file, "X%.7g S%d\n",
-							f4(img->orgx+machine.rl_shift+roundf(x * pxw * 1000.0) / 1000.0),
+							f4(img->orgx + br + beam_ofs + machine.rl_shift + roundf(x * pxw * 1000.0) / 1000.0),
 							curr_spindle);
 				}
 				// make sure not to draw lines between passes
@@ -1389,7 +1419,7 @@ int main(int argc, char **argv)
 
 	while (1) {
 		int option_index = 0;
-		int c = getopt_long(argc, argv, "hi:o:c:f:a:g:m:q:Q:d:HtnrM:S:F:P:", long_options, &option_index);
+		int c = getopt_long(argc, argv, "hi:o:c:f:a:g:m:q:Q:d:HtnrM:S:F:P:w:", long_options, &option_index);
 
 		if (c == -1)
 			break;
@@ -1630,6 +1660,9 @@ int main(int argc, char **argv)
 		case 'r':
 			arg_raw_preview = 1;
 			break;
+		case 'w':
+			machine.beam_w = atof(optarg);
+			break;
 		case ':': /* missing argument */
 		case '?': /* unknown option */
 			die(1, "");
@@ -1708,6 +1741,11 @@ int main(int argc, char **argv)
 		img.mmw = 0;
 
 	img.diam = imgd;
+
+	if (machine.beam_w >= pixw)
+		machine.beam_w = 0.9 * pixw;
+	else if (machine.beam_w <= -pixw)
+		machine.beam_w = -0.9 * pixw;
 
 	if (fmt == OUT_FMT_GCODE && (!img.mmh || !img.mmw) && (center_mode != OUT_CNT_CIRC || !img.diam))
 		die(1, "output image width/height/diameter are mandatory in G-CODE output\n");
