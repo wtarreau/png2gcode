@@ -931,7 +931,12 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 					break;
 
 				case XFRM_GAM:
-					v = exp(log(v + 1.0) / xfrm->arg) / exp(log(2.0) / xfrm->arg);
+					if (v < 0.001)
+						v = 0;
+					else if (v >= 1.000)
+						v = 1.0;
+					else
+						v = pow(v, xfrm->arg);
 					break;
 
 				case XFRM_HASH:
