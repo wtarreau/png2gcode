@@ -259,7 +259,7 @@ void usage(int code, const char *cmd)
 	    "  -c, --center <mode>          auto-center output coordinates (N=none, A=axis, C=circle)\n"
 	    "Transformations are series of operations applied to the work area:\n"
 	    "  -a --add <value>             add <value> [-1..1] to the intensity\n"
-	    "  -g --gamma <value>           apply gamma value <value>\n"
+	    "  -g --gamma <value>           apply abs value from bottom if >0 or from top if <0 (def 1.0)\n"
 	    "  -H --hash                    hash the image by setting 50%% of the dots to intensity 0\n"
 	    "  -t --twins                   average adjacent pixels and send as opposed twins\n"
 	    "  -m --mul <value>             multiply intensity by <value>\n"
@@ -931,12 +931,21 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 					break;
 
 				case XFRM_GAM:
-					if (v < 0.001)
-						v = 0;
-					else if (v >= 1.000)
-						v = 1.0;
-					else
-						v = pow(v, xfrm->arg);
+					if (xfrm->arg > 0) {
+						if (v < 0.001)
+							v = 0;
+						else if (v >= 1.000)
+							v = 1.0;
+						else
+							v = pow(v, xfrm->arg);
+					} else {
+						if (v < 0.001)
+							v = 0;
+						else if (v >= 1.000)
+							v = 1.0;
+						else
+							v = 1.0 - pow(1.0 - v, 1.0 / xfrm->arg);
+					}
 					break;
 
 				case XFRM_HASH:
