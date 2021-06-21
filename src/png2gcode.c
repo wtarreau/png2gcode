@@ -72,6 +72,7 @@ const struct option long_options[] = {
 	{"add",         required_argument, 0, 'a'              },
 	{"mul",         required_argument, 0, 'm'              },
 	{"gamma",       required_argument, 0, 'g'              },
+	{"gamma2",      required_argument, 0, 'G'              },
 	{"hash",        no_argument,       0, 'H'              },
 	{"twins",       no_argument,       0, 't'              },
 	{"diffuse",     required_argument, 0, 'd'              },
@@ -110,6 +111,7 @@ enum xfrm_op {
 	XFRM_ADD,
 	XFRM_MUL,
 	XFRM_GAM,
+	XFRM_GAM2,
 	XFRM_HASH,
 	XFRM_NORMALIZE,
 	XFRM_QUANTIZE,
@@ -260,6 +262,7 @@ void usage(int code, const char *cmd)
 	    "Transformations are series of operations applied to the work area:\n"
 	    "  -a --add <value>             add <value> [-1..1] to the intensity\n"
 	    "  -g --gamma <value>           apply abs value from bottom if >0 or from top if <0 (def 1.0)\n"
+	    "  -G --gamma2 <value>          apply a centered gamma correction (def 1.0)\n"
 	    "  -H --hash                    hash the image by setting 50%% of the dots to intensity 0\n"
 	    "  -t --twins                   average adjacent pixels and send as opposed twins\n"
 	    "  -m --mul <value>             multiply intensity by <value>\n"
@@ -948,6 +951,17 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 					}
 					break;
 
+				case XFRM_GAM2:
+					if (v < 0.001)
+						v = 0;
+					else if (v >= 1.000)
+						v = 1.0;
+					else if (xfrm->arg > 1.0)
+						v = fmax(pow(v, xfrm->arg), 1.0 - pow(1.0 - v, 1.0 / xfrm->arg));
+					else if (xfrm->arg < 1.0)
+						v = fmin(pow(v, xfrm->arg), 1.0 - pow(1.0 - v, 1.0 / xfrm->arg));
+					break;
+
 				case XFRM_HASH:
 					if ((x ^ y) & 1)
 						v -= soften[p];
@@ -1433,7 +1447,7 @@ int main(int argc, char **argv)
 
 	while (1) {
 		int option_index = 0;
-		int c = getopt_long(argc, argv, "hi:o:c:f:a:g:m:q:Q:d:HtnrM:S:F:P:w:", long_options, &option_index);
+		int c = getopt_long(argc, argv, "hi:o:c:f:a:g:G:m:q:Q:d:HtnrM:S:F:P:w:", long_options, &option_index);
 
 		if (c == -1)
 			break;
@@ -1524,6 +1538,14 @@ int main(int argc, char **argv)
 
 		case 'g':
 			curr = xfrm_new(curr, XFRM_GAM, atof(optarg));
+			if (!curr)
+				die(1, "failed to allocate a new transformation\n", optarg);
+			if (!xfrm)
+				xfrm = curr;
+			break;
+
+		case 'G':
+			curr = xfrm_new(curr, XFRM_GAM2, atof(optarg));
 			if (!curr)
 				die(1, "failed to allocate a new transformation\n", optarg);
 			if (!xfrm)
