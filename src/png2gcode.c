@@ -1319,15 +1319,15 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 					yr = roundf(yr * 1000.0) / 1000.0;
 					ymoved = 1;
 
+					if (br > 0.0 && machine.beam_w < 0.0 && y & 1)
+						beam_ofs = br;
+					else
+						beam_ofs = 0.0;
+
 					curr_spindle = 0;
 					x0 = 0;
 					for (x = 0; x < img->w; x++) {
 						uint32_t spindle = img->work[y * img->w + x] * base_spindle;
-
-						if (br > 0.0 && machine.beam_w < 0.0 && y & 1)
-							beam_ofs = br;
-						else
-							beam_ofs = 0.0;
 
 						xr = x * pxw;
 						if (br > 0.0 && curr_spindle) {
@@ -1357,7 +1357,7 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 					/* trace last pixels */
 					if (curr_spindle)
 						fprintf(file, "X%.7g S%d\n",
-							f4(img->orgx - br + beam_ofs + roundf(x * pxw* 1000.0) / 1000.0),
+							f4(img->orgx - br + beam_ofs + roundf(x * pxw * 1000.0) / 1000.0),
 							curr_spindle);
 
 					/* go back to left position if LR mode */
@@ -1372,15 +1372,15 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 					yr = roundf(yr * 1000.0) / 1000.0;
 					ymoved = 1;
 
+					if (br > 0.0 && machine.beam_w < 0.0 && y & 1)
+						beam_ofs = br;
+					else
+						beam_ofs = 0.0;
+
 					curr_spindle = 0;
 					x0 = 0;
 					for (x = img->w; x > 0; x--) {
 						uint32_t spindle = img->work[y * img->w + x - 1] * base_spindle;
-
-						if (br > 0.0 && machine.beam_w < 0.0 && y & 1)
-							beam_ofs = br;
-						else
-							beam_ofs = 0.0;
 
 						xr = x * pxw;
 						if (br > 0.0 && curr_spindle) {
@@ -1393,7 +1393,7 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 							continue;
 						xr = roundf(xr * 1000.0) / 1000.0;
 						if (!curr_spindle && (!x0 || ymoved || x0 - x > 20)) {
-							fprintf(file, "G0 X%.7g", f4(img->orgx+xr+machine.rl_shift-br)); // no lf here, at least one X will follow
+							fprintf(file, "G0 X%.7g", f4(img->orgx+xr+machine.rl_shift-br+beam_ofs)); // no lf here, at least one X will follow
 							if (ymoved) {
 								ymoved = 0;
 								fprintf(file, " Y%.7g", f4(img->orgy+yr)); // no lf here, at least one X will follow
