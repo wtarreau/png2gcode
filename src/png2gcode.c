@@ -85,6 +85,7 @@ const struct option long_options[] = {
 	{"passes",      required_argument, 0, 'P'              },
 	{"spindle",     required_argument, 0, 'S'              },
 	{"beam-width",  required_argument, 0, 'w'              },
+	{"x-accel",     required_argument, 0, 'A'              },
 	{"soften",      required_argument, 0, OPT_SOFTEN       },
 	{"crop-bottom", required_argument, 0, OPT_CROP_BOTTOM  },
 	{"crop-left",   required_argument, 0, OPT_CROP_LEFT    },
@@ -169,6 +170,7 @@ struct material {
 struct machine {
 	float rl_shift;           // offset to add to R->L paths in raster mode to compensate for machine imprecision
 	float beam_w;             // beam width in mm (limited to px size for now)
+	float x_accel;            // acceleration/deceleration distance on X axis
 	const char *laser_on;     // laser-on command
 } machine = {
 	     .rl_shift = -0.05,
@@ -279,6 +281,7 @@ void usage(int code, const char *cmd)
 	    "  -d --diffuse <ratio>         adjacent radiation for hash & soften (def:0.18)\n"
 	    "Machine settings:\n"
 	    "  -w --beam-width <mm>         beam width in millimeters (def: 0, max:90% pxw, neg=alt)\n"
+	    "  -A --x-accel <mm>            X axis acceleration distance in millimeters (def: 0)\n"
 	    "     --rl-shift <millimeters>  offset to apply to R->L path in raster mode (def:-0.05)\n"
 	    "     --laser-on <cmd>          command to turn laser ON (def:M4)\n"
 	    "Notes:\n"
@@ -1310,6 +1313,11 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 				 * There is a "from" and a "to" location for each. In L->R
 				 * direction, "from" is the previous x (or x0) and "to" is
 				 * x. In R->L, the spindle is given by pixel x-1.
+				 *
+				 * A margin is supported on each side to let the X axis accelerate
+				 * and decelerate. This avoids the uneven etching on borders that
+				 * particularly affects printed text: overburns under M3, and
+				 * underburns under M4. This margin is machine-specific.
 				 */
 				for (y = 0; y < img->h; y++) {
 					/* first pass, left to right */
@@ -1339,13 +1347,21 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 						if (spindle == curr_spindle)
 							continue;
 						xr = roundf(xr * 1000.0) / 1000.0;
-						if (!curr_spindle && (!x0 || ymoved || x - x0 > 20)) {
-							fprintf(file, "G0 X%.7g", f4(img->orgx+xr+br+beam_ofs)); // no lf here, at least one X will follow
+						if (!curr_spindle && (!x0 || ymoved || (x - x0) * pxw >= 2.0 + 2.0 * machine.x_accel)) {
+							/* get away at normal speed */
+							if (x0 && machine.x_accel)
+								fprintf(file, "X%.7g S0\n",
+									f4(img->orgx + roundf(x0 * pxw * 1000.0) / 1000.0 + machine.x_accel + br+beam_ofs));
+
+							fprintf(file, "G0 X%.7g", f4(img->orgx+xr+br+beam_ofs-machine.x_accel)); // no lf here, at least one X will follow
 							if (ymoved) {
 								ymoved = 0;
 								fprintf(file, " Y%.7g", f4(img->orgy+yr)); // no lf here, at least one X will follow
 							}
 							fprintf(file, "\nG1 "); // no lf here, at least one X will follow
+							/* finish approach at normal speed */
+							if (machine.x_accel)
+								fprintf(file, "X%.7g S0\n", f4(img->orgx+xr+br+beam_ofs));
 						}
 						else
 							fprintf(file, "X%.7g S%d\n", f4(img->orgx+xr+br+beam_ofs), curr_spindle);
@@ -1359,6 +1375,11 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 						fprintf(file, "X%.7g S%d\n",
 							f4(img->orgx - br + beam_ofs + roundf(x * pxw * 1000.0) / 1000.0),
 							curr_spindle);
+
+					/* get away at normal speed */
+					if (machine.x_accel)
+						fprintf(file, "X%.7g S0\n",
+							f4(img->orgx - br + beam_ofs + machine.x_accel + roundf(x * pxw * 1000.0) / 1000.0));
 
 					/* go back to left position if LR mode */
 					if (pass->mode == PASS_MODE_RASTER_LR)
@@ -1392,13 +1413,21 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 						if (spindle == curr_spindle)
 							continue;
 						xr = roundf(xr * 1000.0) / 1000.0;
-						if (!curr_spindle && (!x0 || ymoved || x0 - x > 20)) {
-							fprintf(file, "G0 X%.7g", f4(img->orgx+xr+machine.rl_shift-br+beam_ofs)); // no lf here, at least one X will follow
+						if (!curr_spindle && (!x0 || ymoved || (x0 - x) * pxw >= 2.0 + 2.0 * machine.x_accel)) {
+							/* get away at normal speed */
+							if (x0 && machine.x_accel)
+								fprintf(file, "X%.7g S0\n",
+									f4(img->orgx + roundf(x0 * pxw * 1000.0) / 1000.0 - machine.x_accel + br+beam_ofs));
+
+							fprintf(file, "G0 X%.7g", f4(img->orgx+xr+machine.rl_shift-br+beam_ofs+machine.x_accel)); // no lf here, at least one X will follow
 							if (ymoved) {
 								ymoved = 0;
 								fprintf(file, " Y%.7g", f4(img->orgy+yr)); // no lf here, at least one X will follow
 							}
 							fprintf(file, "\nG1 "); // no lf here, at least one X will follow
+							/* finish approach at normal speed */
+							if (machine.x_accel)
+								fprintf(file, "X%.7g S0\n", f4(img->orgx+xr+machine.rl_shift-br+beam_ofs));
 						} else
 							fprintf(file, "X%.7g S%d\n", f4(img->orgx+xr+br+beam_ofs+machine.rl_shift), curr_spindle);
 
@@ -1411,6 +1440,11 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 						fprintf(file, "X%.7g S%d\n",
 							f4(img->orgx + br + beam_ofs + machine.rl_shift + roundf(x * pxw * 1000.0) / 1000.0),
 							curr_spindle);
+
+					/* get away at normal speed */
+					if (machine.x_accel)
+						fprintf(file, "X%.7g S0\n",
+							f4(img->orgx - br + beam_ofs + machine.rl_shift - machine.x_accel + roundf(x * pxw * 1000.0) / 1000.0));
 				}
 				// make sure not to draw lines between passes
 				fprintf(file, "M5 S0\nG0\n");
@@ -1447,7 +1481,7 @@ int main(int argc, char **argv)
 
 	while (1) {
 		int option_index = 0;
-		int c = getopt_long(argc, argv, "hi:o:c:f:a:g:G:m:q:Q:d:HtnrM:S:F:P:w:", long_options, &option_index);
+		int c = getopt_long(argc, argv, "hi:o:c:f:a:g:G:m:q:Q:d:HtnrM:S:F:P:w:A:", long_options, &option_index);
 
 		if (c == -1)
 			break;
@@ -1698,6 +1732,9 @@ int main(int argc, char **argv)
 			break;
 		case 'w':
 			machine.beam_w = atof(optarg);
+			break;
+		case 'A':
+			machine.x_accel = atof(optarg);
 			break;
 		case ':': /* missing argument */
 		case '?': /* unknown option */
