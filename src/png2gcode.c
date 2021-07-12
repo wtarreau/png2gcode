@@ -1342,6 +1342,7 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 							/* finish previous pixel to avoid a burn */
 							fprintf(file, "X%.7g S%d\n", f4(img->orgx+xr-br+beam_ofs), curr_spindle);
 							curr_spindle = 0;
+							x0 = x;
 						}
 
 						if (spindle == curr_spindle)
@@ -1408,6 +1409,7 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 							/* finish previous pixel to avoid a burn */
 							fprintf(file, "X%.7g S%d\n", f4(img->orgx+xr+machine.rl_shift+br+beam_ofs), curr_spindle);
 							curr_spindle = 0;
+							x0 = x;
 						}
 
 						if (spindle == curr_spindle)
