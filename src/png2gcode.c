@@ -1290,6 +1290,7 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 				uint32_t curr_spindle;
 				unsigned int x, y, x0;
 				float xr, yr;   // real positions in millimeters
+				float xl; // last non-empty X, in millimeters
 				float beam_ofs;
 				int ymoved;
 				float rl_shift = machine.rl_shift + machine.rl_delay / 1000.0 * pass->feed / 60.0;
@@ -1340,10 +1341,14 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 
 					curr_spindle = 0;
 					x0 = 0;
+					xl = -1;
 					for (x = 0; x < img->w; x++) {
 						uint32_t spindle = img->work[y * img->w + x] * base_spindle;
 
 						xr = x * pxw;
+						if (spindle)
+							xl = xr;
+
 						if (br > 0.0 && curr_spindle) {
 							/* finish previous pixel to avoid a burn */
 							fprintf(file, "X%.7g S%d\n", f4(img->orgx+xr-br+beam_ofs), curr_spindle);
@@ -1384,9 +1389,9 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 							curr_spindle);
 
 					/* get away at normal speed */
-					if (machine.x_accel)
+					if (machine.x_accel && xl >= 0)
 						fprintf(file, "X%.7g S0\n",
-							f4(img->orgx - br + beam_ofs + machine.x_accel + roundf(x * pxw * 1000.0) / 1000.0));
+							f4(img->orgx - br + beam_ofs + machine.x_accel + roundf(xl * 1000.0) / 1000.0));
 
 					/* go back to left position if LR mode */
 					if (pass->mode == PASS_MODE_RASTER_LR)
@@ -1407,10 +1412,14 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 
 					curr_spindle = 0;
 					x0 = 0;
+					xl = -1;
 					for (x = img->w; x > 0; x--) {
 						uint32_t spindle = img->work[y * img->w + x - 1] * base_spindle;
 
 						xr = x * pxw;
+						if (spindle)
+							xl = xr;
+
 						if (br > 0.0 && curr_spindle) {
 							/* finish previous pixel to avoid a burn */
 							fprintf(file, "X%.7g S%d\n", f4(img->orgx + xr + rl_shift + br + beam_ofs), curr_spindle);
@@ -1450,9 +1459,9 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 							curr_spindle);
 
 					/* get away at normal speed */
-					if (machine.x_accel)
+					if (machine.x_accel && xl >= 0)
 						fprintf(file, "X%.7g S0\n",
-							f4(img->orgx - br + beam_ofs + rl_shift - machine.x_accel + roundf(x * pxw * 1000.0) / 1000.0));
+							f4(img->orgx - br + beam_ofs + rl_shift - machine.x_accel + roundf(xl * 1000.0) / 1000.0));
 				}
 				// make sure not to draw lines between passes
 				fprintf(file, "M5 S0\nG0\n");
