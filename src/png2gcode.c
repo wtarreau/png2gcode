@@ -59,6 +59,7 @@ enum opt {
 	OPT_PIXH,
 	OPT_PIXS,
 	OPT_RL_SHIFT,
+	OPT_RL_DELAY,
 	OPT_LASER_ON,
 	OPT_TEST,
 };
@@ -101,6 +102,7 @@ const struct option long_options[] = {
 	{"pixel-height",required_argument, 0, OPT_PIXH         },
 	{"pixel-size",  required_argument, 0, OPT_PIXS         },
 	{"rl-shift",    required_argument, 0, OPT_RL_SHIFT     },
+	{"rl-delay",    required_argument, 0, OPT_RL_DELAY     },
 	{"laser-on",    required_argument, 0, OPT_LASER_ON     },
 	{"test",        required_argument, 0, OPT_TEST         },
 	{0,             0,                 0, 0                }
@@ -169,11 +171,13 @@ struct material {
 
 struct machine {
 	float rl_shift;           // offset to add to R->L paths in raster mode to compensate for machine imprecision
+	float rl_delay;           // time offset to add to R->L paths in raster mode to compensate for machine imprecision
 	float beam_w;             // beam width in mm (limited to px size for now)
 	float x_accel;            // acceleration/deceleration distance on X axis
 	const char *laser_on;     // laser-on command
 } machine = {
-	     .rl_shift = -0.05,
+	     .rl_shift = 0,
+	     .rl_delay = 0,
 	     .beam_w   = 0,
 	     .laser_on = "M4",
 };
@@ -282,7 +286,8 @@ void usage(int code, const char *cmd)
 	    "Machine settings:\n"
 	    "  -w --beam-width <mm>         beam width in millimeters (def: 0, max:90% pxw, neg=alt)\n"
 	    "  -A --x-accel <mm>            X axis acceleration distance in millimeters (def: 0)\n"
-	    "     --rl-shift <millimeters>  offset to apply to R->L path in raster mode (def:-0.05)\n"
+	    "     --rl-shift <millimeters>  offset to apply to R->L path in raster mode (def:0)\n"
+	    "     --rl-delay <millisec>     time offset to apply to R->L path in raster mode (def:0)\n"
 	    "     --laser-on <cmd>          command to turn laser ON (def:M4)\n"
 	    "Notes:\n"
 	    "  - for images, use -H for wood or -t on aluminum\n"
@@ -1287,6 +1292,7 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 				float xr, yr;   // real positions in millimeters
 				float beam_ofs;
 				int ymoved;
+				float rl_shift = machine.rl_shift + machine.rl_delay / 1000.0 * pass->feed / 60.0;
 
 				fprintf(file, "%s S%d\nG1 F%d\n",
 					machine.laser_on,
@@ -1407,7 +1413,7 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 						xr = x * pxw;
 						if (br > 0.0 && curr_spindle) {
 							/* finish previous pixel to avoid a burn */
-							fprintf(file, "X%.7g S%d\n", f4(img->orgx+xr+machine.rl_shift+br+beam_ofs), curr_spindle);
+							fprintf(file, "X%.7g S%d\n", f4(img->orgx + xr + rl_shift + br + beam_ofs), curr_spindle);
 							curr_spindle = 0;
 							x0 = x;
 						}
@@ -1421,7 +1427,7 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 								fprintf(file, "X%.7g S0\n",
 									f4(img->orgx + roundf(x0 * pxw * 1000.0) / 1000.0 - machine.x_accel + br+beam_ofs));
 
-							fprintf(file, "G0 X%.7g", f4(img->orgx+xr+machine.rl_shift-br+beam_ofs+machine.x_accel)); // no lf here, at least one X will follow
+							fprintf(file, "G0 X%.7g", f4(img->orgx + xr + rl_shift - br + beam_ofs + machine.x_accel)); // no lf here, at least one X will follow
 							if (ymoved) {
 								ymoved = 0;
 								fprintf(file, " Y%.7g", f4(img->orgy+yr)); // no lf here, at least one X will follow
@@ -1429,9 +1435,9 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 							fprintf(file, "\nG1 "); // no lf here, at least one X will follow
 							/* finish approach at normal speed */
 							if (machine.x_accel)
-								fprintf(file, "X%.7g S0\n", f4(img->orgx+xr+machine.rl_shift-br+beam_ofs));
+								fprintf(file, "X%.7g S0\n", f4(img->orgx + xr + rl_shift - br + beam_ofs));
 						} else
-							fprintf(file, "X%.7g S%d\n", f4(img->orgx+xr+br+beam_ofs+machine.rl_shift), curr_spindle);
+							fprintf(file, "X%.7g S%d\n", f4(img->orgx + xr + br + beam_ofs + rl_shift), curr_spindle);
 
 						curr_spindle = spindle;
 						if (!spindle)
@@ -1440,13 +1446,13 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 					/* trace last pixels */
 					if (curr_spindle)
 						fprintf(file, "X%.7g S%d\n",
-							f4(img->orgx + br + beam_ofs + machine.rl_shift + roundf(x * pxw * 1000.0) / 1000.0),
+							f4(img->orgx + br + beam_ofs + rl_shift + roundf(x * pxw * 1000.0) / 1000.0),
 							curr_spindle);
 
 					/* get away at normal speed */
 					if (machine.x_accel)
 						fprintf(file, "X%.7g S0\n",
-							f4(img->orgx - br + beam_ofs + machine.rl_shift - machine.x_accel + roundf(x * pxw * 1000.0) / 1000.0));
+							f4(img->orgx - br + beam_ofs + rl_shift - machine.x_accel + roundf(x * pxw * 1000.0) / 1000.0));
 				}
 				// make sure not to draw lines between passes
 				fprintf(file, "M5 S0\nG0\n");
@@ -1554,6 +1560,10 @@ int main(int argc, char **argv)
 
 		case OPT_RL_SHIFT:
 			machine.rl_shift = atof(optarg);
+			break;
+
+		case OPT_RL_DELAY:
+			machine.rl_delay = atof(optarg);
 			break;
 
 		case OPT_LASER_ON:
