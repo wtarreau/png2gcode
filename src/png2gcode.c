@@ -1539,7 +1539,7 @@ int main(int argc, char **argv)
 		case OPT_SOFTEN:
 			curr = xfrm_new(curr, XFRM_SOFTEN, 1, &arg_f);
 			if (!curr)
-				die(1, "failed to allocate a new transformation\n", optarg);
+				die(1, "failed to allocate a new transformation\n");
 			if (!xfrm)
 				xfrm = curr;
 			break;
@@ -1595,7 +1595,7 @@ int main(int argc, char **argv)
 		case 'a':
 			curr = xfrm_new(curr, XFRM_ADD, 1, &arg_f);
 			if (!curr)
-				die(1, "failed to allocate a new transformation\n", optarg);
+				die(1, "failed to allocate a new transformation\n");
 			if (!xfrm)
 				xfrm = curr;
 			break;
@@ -1603,7 +1603,7 @@ int main(int argc, char **argv)
 		case 'g':
 			curr = xfrm_new(curr, XFRM_GAM, 1, &arg_f);
 			if (!curr)
-				die(1, "failed to allocate a new transformation\n", optarg);
+				die(1, "failed to allocate a new transformation\n");
 			if (!xfrm)
 				xfrm = curr;
 			break;
@@ -1611,7 +1611,7 @@ int main(int argc, char **argv)
 		case 'G':
 			curr = xfrm_new(curr, XFRM_GAM2, 1, &arg_f);
 			if (!curr)
-				die(1, "failed to allocate a new transformation\n", optarg);
+				die(1, "failed to allocate a new transformation\n");
 			if (!xfrm)
 				xfrm = curr;
 			break;
@@ -1619,7 +1619,7 @@ int main(int argc, char **argv)
 		case 'H':
 			curr = xfrm_new(curr, XFRM_HASH, 0, NULL);
 			if (!curr)
-				die(1, "failed to allocate a new transformation\n", optarg);
+				die(1, "failed to allocate a new transformation\n");
 			if (!xfrm)
 				xfrm = curr;
 			break;
@@ -1627,7 +1627,7 @@ int main(int argc, char **argv)
 		case 't':
 			curr = xfrm_new(curr, XFRM_TWINS, 0, NULL);
 			if (!curr)
-				die(1, "failed to allocate a new transformation\n", optarg);
+				die(1, "failed to allocate a new transformation\n");
 			if (!xfrm)
 				xfrm = curr;
 			break;
@@ -1635,7 +1635,7 @@ int main(int argc, char **argv)
 		case 'm':
 			curr = xfrm_new(curr, XFRM_MUL, 1, &arg_f);
 			if (!curr)
-				die(1, "failed to allocate a new transformation\n", optarg);
+				die(1, "failed to allocate a new transformation\n");
 			if (!xfrm)
 				xfrm = curr;
 			break;
@@ -1643,7 +1643,7 @@ int main(int argc, char **argv)
 		case 'n':
 			curr = xfrm_new(curr, XFRM_NORMALIZE, 0, NULL);
 			if (!curr)
-				die(1, "failed to allocate a new transformation\n", optarg);
+				die(1, "failed to allocate a new transformation\n");
 			if (!xfrm)
 				xfrm = curr;
 			break;
@@ -1654,7 +1654,7 @@ int main(int argc, char **argv)
 
 			curr = xfrm_new(curr, XFRM_QUANTIZE, 1, &arg_f);
 			if (!curr)
-				die(1, "failed to allocate a new transformation\n", optarg);
+				die(1, "failed to allocate a new transformation\n");
 			if (!xfrm)
 				xfrm = curr;
 			break;
@@ -1665,7 +1665,7 @@ int main(int argc, char **argv)
 
 			curr = xfrm_new(curr, XFRM_QFREQ, 1, &arg_f);
 			if (!curr)
-				die(1, "failed to allocate a new transformation\n", optarg);
+				die(1, "failed to allocate a new transformation\n");
 			if (!xfrm)
 				xfrm = curr;
 			break;
