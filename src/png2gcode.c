@@ -65,6 +65,7 @@ enum opt {
 	OPT_RL_DELAY,
 	OPT_LASER_ON,
 	OPT_TEST,
+	OPT_MAP,
 };
 
 const struct option long_options[] = {
@@ -108,6 +109,7 @@ const struct option long_options[] = {
 	{"rl-delay",    required_argument, 0, OPT_RL_DELAY     },
 	{"laser-on",    required_argument, 0, OPT_LASER_ON     },
 	{"test",        required_argument, 0, OPT_TEST         },
+	{"map",         required_argument, 0, OPT_MAP          },
 	{0,             0,                 0, 0                }
 };
 
@@ -124,6 +126,7 @@ enum xfrm_op {
 	XFRM_SOFTEN,    // args: 0=value
 	XFRM_QFREQ,     // args: 0=levels
 	XFRM_TWINS,     // args: none
+	XFRM_MAP,       // args: [from_min:from_max:]to_min:to_max[:gamma2]
 };
 
 struct xfrm {
@@ -279,6 +282,7 @@ void usage(int code, const char *cmd)
 	    "  -q --quantize <levels>       quantize to <levels> levels\n"
 	    "  -Q --qfreq <levels>          quantize to <levels> levels based on frequency\n"
 	    "     --soften <value>          subtract neighbors' average times <value>\n"
+	    "     --map <args[2..5]>        map values [from_min:from_max:]to_min:to_max[:gamma2]\n"
 	    "Passes are used in G-CODE output format (-f gcode):\n"
 	    "  -M --mode    <mode>          pass mode (origin,x,y,axis,diag,frame,raster,raster-lr)\n"
 	    "  -F --feed    <value>         feed rate (mm/min, def:4800 frame, 1200 raster)\n"
@@ -1041,6 +1045,28 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 				case XFRM_NORMALIZE:
 					v = (v - norm_min) / (norm_max - norm_min);
 					break;
+
+				case XFRM_MAP:
+					/* map input range to [0..1] */
+					if (v < xfrm->args[0])
+						v = xfrm->args[0];
+					else if (v > xfrm->args[1])
+						v = xfrm->args[1];
+
+					v -= xfrm->args[0];
+					v /= xfrm->args[1] - xfrm->args[0];
+
+					/* apply gamma2 over the intermediary window */
+					if (xfrm->args[4] > 1.0)
+						v = fmax(pow(v, xfrm->args[4]), 1.0 - pow(1.0 - v, 1.0 / xfrm->args[4]));
+					else if (xfrm->args[4] < 1.0)
+						v = fmin(pow(v, xfrm->args[4]), 1.0 - pow(1.0 - v, 1.0 / xfrm->args[4]));
+
+					/* remap to the output range */
+					v *= xfrm->args[3] - xfrm->args[2];
+					v += xfrm->args[2];
+					break;
+
 				default:
 					break;
 				}
@@ -1591,6 +1617,56 @@ int main(int argc, char **argv)
 		case OPT_TEST:
 			test_sz = arg_i;
 			break;
+
+		case OPT_MAP: {  /* [from_min:from_max:]to_min:to_max[:gamma2] */
+			char *nptr = optarg;
+			char *endptr;
+			float args[5];
+			int narg;
+
+			for (narg = 0; *nptr && narg < 5;) {
+				args[narg++] = strtof(nptr, &endptr);
+				if (!*endptr)
+					break;
+				if (*endptr != ':')
+					die(1, "unparsable map <%s> (char %d)\n", optarg, endptr - optarg);
+				nptr = endptr + 1;
+			}
+
+			switch (narg) {
+			case 5: /* from_min:from_max:to_min:to_max:gamma2 */
+				break;
+			case 4: /* from_min:from_max:to_min:to_max */
+				args[4] = 1.0; // default gamma2
+				break;
+			case 3: /* to_min:to_max:gamma2 */
+				args[4] = args[2];
+				args[3] = args[1];
+				args[2] = args[0];
+				args[1] = 1.0;
+				args[0] = 0.0;
+				break;
+			case 2: /* to_min:to_max */
+				args[4] = 1.0; // default gamma2
+				args[3] = args[1];
+				args[2] = args[0];
+				args[1] = 1.0;
+				args[0] = 0.0;
+				break;
+			default:
+				die(1, "missing argument in map <%s>\n", optarg);
+			}
+
+			if (args[0] >= args[1])
+				die(1, "map <%s>: from_min must be lower than from_max\n", optarg);
+
+			curr = xfrm_new(curr, XFRM_MAP, 5, args);
+			if (!curr)
+				die(1, "failed to allocate a new transformation\n");
+			if (!xfrm)
+				xfrm = curr;
+			break;
+		}
 
 		case 'a':
 			curr = xfrm_new(curr, XFRM_ADD, 1, &arg_f);
