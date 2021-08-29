@@ -15,6 +15,9 @@
 #define DEFAULT_FEED_SHOW        4800
 #define DEFAULT_FEED_RASTER      1200
 
+/* max number of arguments for a transformation */
+#define MAX_XFRM_ARGS 10
+
 struct image {
 	uint32_t w;    // width in pixels
 	uint32_t h;    // height in pixels
@@ -111,21 +114,21 @@ const struct option long_options[] = {
 /* describe one transformation to apply to the image */
 enum xfrm_op {
 	XFRM_NOP = 0,
-	XFRM_ADD,
-	XFRM_MUL,
-	XFRM_GAM,
-	XFRM_GAM2,
-	XFRM_HASH,
-	XFRM_NORMALIZE,
-	XFRM_QUANTIZE,
-	XFRM_SOFTEN,
-	XFRM_QFREQ,
-	XFRM_TWINS,
+	XFRM_ADD,       // args: 0=value
+	XFRM_MUL,       // args: 0=value
+	XFRM_GAM,       // args: 0=value
+	XFRM_GAM2,      // args: 0=value
+	XFRM_HASH,      // args: none
+	XFRM_NORMALIZE, // args: none
+	XFRM_QUANTIZE,  // args: 0=levels
+	XFRM_SOFTEN,    // args: 0=value
+	XFRM_QFREQ,     // args: 0=levels
+	XFRM_TWINS,     // args: none
 };
 
 struct xfrm {
 	enum xfrm_op op;
-	float arg;
+	float args[MAX_XFRM_ARGS];
 	struct xfrm *next;
 };
 
@@ -588,17 +591,21 @@ int crop_gray_image(struct image *img, uint32_t x0, uint32_t y0, uint32_t x1, ui
 }
 
 /* append a transformation to list <curr> */
-struct xfrm *xfrm_new(struct xfrm *curr, enum xfrm_op op, float arg)
+struct xfrm *xfrm_new(struct xfrm *curr, enum xfrm_op op, unsigned nbargs, const float *args)
 {
 	struct xfrm *new;
 
-	new = malloc(sizeof(*new));
+	if (nbargs > MAX_XFRM_ARGS)
+		return NULL;
+
+	new = calloc(1, sizeof(*new));
 	if (!new)
 		return NULL;
 
 	new->op    = op;
-	new->arg   = arg;
-	new->next  = NULL;
+	if (nbargs)
+		memcpy(new->args, args, nbargs * sizeof(*args));
+
 	if (curr)
 		curr->next = new;
 	return new;
@@ -931,31 +938,31 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 
 				switch (xfrm->op) {
 				case XFRM_ADD:
-					v += xfrm->arg;
+					v += xfrm->args[0];
 					break;
 
 				case XFRM_MUL: /* negative inverts starting from 1.0 */
-					if (xfrm->arg >= 0.0)
-						v *= xfrm->arg;
+					if (xfrm->args[0] >= 0.0)
+						v *= xfrm->args[0];
 					else
-						v = 1.0 + v * xfrm->arg;
+						v = 1.0 + v * xfrm->args[0];
 					break;
 
 				case XFRM_GAM:
-					if (xfrm->arg > 0) {
+					if (xfrm->args[0] > 0) {
 						if (v < 0.001)
 							v = 0;
 						else if (v >= 1.000)
 							v = 1.0;
 						else
-							v = pow(v, xfrm->arg);
+							v = pow(v, xfrm->args[0]);
 					} else {
 						if (v < 0.001)
 							v = 0;
 						else if (v >= 1.000)
 							v = 1.0;
 						else
-							v = 1.0 - pow(1.0 - v, 1.0 / xfrm->arg);
+							v = 1.0 - pow(1.0 - v, 1.0 / xfrm->args[0]);
 					}
 					break;
 
@@ -964,10 +971,10 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 						v = 0;
 					else if (v >= 1.000)
 						v = 1.0;
-					else if (xfrm->arg > 1.0)
-						v = fmax(pow(v, xfrm->arg), 1.0 - pow(1.0 - v, 1.0 / xfrm->arg));
-					else if (xfrm->arg < 1.0)
-						v = fmin(pow(v, xfrm->arg), 1.0 - pow(1.0 - v, 1.0 / xfrm->arg));
+					else if (xfrm->args[0] > 1.0)
+						v = fmax(pow(v, xfrm->args[0]), 1.0 - pow(1.0 - v, 1.0 / xfrm->args[0]));
+					else if (xfrm->args[0] < 1.0)
+						v = fmin(pow(v, xfrm->args[0]), 1.0 - pow(1.0 - v, 1.0 / xfrm->args[0]));
 					break;
 
 				case XFRM_HASH:
@@ -1004,7 +1011,7 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 				case XFRM_QUANTIZE:
 					/* make sure to create even steps from 0.0 to 1.0 inclusive */
 					if (v > 0)
-						v = floor(v * xfrm->arg) / (xfrm->arg - 1);
+						v = floor(v * xfrm->args[0]) / (xfrm->args[0] - 1);
 					else
 						v = 0;
 					break;
@@ -1022,13 +1029,13 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 
 					/* make sure to create even steps from 0.0 to 1.0 inclusive */
 					if (v > 0)
-						v = floor(v * xfrm->arg) / (xfrm->arg - 1);
+						v = floor(v * xfrm->args[0]) / (xfrm->args[0] - 1);
 					else
 						v = 0;
 					break;
 
 				case XFRM_SOFTEN:
-					v -= soften[p] * xfrm->arg;
+					v -= soften[p] * xfrm->args[0];
 					break;
 
 				case XFRM_NORMALIZE:
@@ -1530,7 +1537,7 @@ int main(int argc, char **argv)
 			break;
 
 		case OPT_SOFTEN:
-			curr = xfrm_new(curr, XFRM_SOFTEN, arg_f);
+			curr = xfrm_new(curr, XFRM_SOFTEN, 1, &arg_f);
 			if (!curr)
 				die(1, "failed to allocate a new transformation\n", optarg);
 			if (!xfrm)
@@ -1586,7 +1593,7 @@ int main(int argc, char **argv)
 			break;
 
 		case 'a':
-			curr = xfrm_new(curr, XFRM_ADD, arg_f);
+			curr = xfrm_new(curr, XFRM_ADD, 1, &arg_f);
 			if (!curr)
 				die(1, "failed to allocate a new transformation\n", optarg);
 			if (!xfrm)
@@ -1594,7 +1601,7 @@ int main(int argc, char **argv)
 			break;
 
 		case 'g':
-			curr = xfrm_new(curr, XFRM_GAM, arg_f);
+			curr = xfrm_new(curr, XFRM_GAM, 1, &arg_f);
 			if (!curr)
 				die(1, "failed to allocate a new transformation\n", optarg);
 			if (!xfrm)
@@ -1602,7 +1609,7 @@ int main(int argc, char **argv)
 			break;
 
 		case 'G':
-			curr = xfrm_new(curr, XFRM_GAM2, arg_f);
+			curr = xfrm_new(curr, XFRM_GAM2, 1, &arg_f);
 			if (!curr)
 				die(1, "failed to allocate a new transformation\n", optarg);
 			if (!xfrm)
@@ -1610,7 +1617,7 @@ int main(int argc, char **argv)
 			break;
 
 		case 'H':
-			curr = xfrm_new(curr, XFRM_HASH, 0);
+			curr = xfrm_new(curr, XFRM_HASH, 0, NULL);
 			if (!curr)
 				die(1, "failed to allocate a new transformation\n", optarg);
 			if (!xfrm)
@@ -1618,7 +1625,7 @@ int main(int argc, char **argv)
 			break;
 
 		case 't':
-			curr = xfrm_new(curr, XFRM_TWINS, 0);
+			curr = xfrm_new(curr, XFRM_TWINS, 0, NULL);
 			if (!curr)
 				die(1, "failed to allocate a new transformation\n", optarg);
 			if (!xfrm)
@@ -1626,7 +1633,7 @@ int main(int argc, char **argv)
 			break;
 
 		case 'm':
-			curr = xfrm_new(curr, XFRM_MUL, arg_f);
+			curr = xfrm_new(curr, XFRM_MUL, 1, &arg_f);
 			if (!curr)
 				die(1, "failed to allocate a new transformation\n", optarg);
 			if (!xfrm)
@@ -1634,7 +1641,7 @@ int main(int argc, char **argv)
 			break;
 
 		case 'n':
-			curr = xfrm_new(curr, XFRM_NORMALIZE, 0);
+			curr = xfrm_new(curr, XFRM_NORMALIZE, 0, NULL);
 			if (!curr)
 				die(1, "failed to allocate a new transformation\n", optarg);
 			if (!xfrm)
@@ -1645,7 +1652,7 @@ int main(int argc, char **argv)
 			if (arg_f <= 1)
 				die(1, "quantize levels must be > 1\n");
 
-			curr = xfrm_new(curr, XFRM_QUANTIZE, arg_f);
+			curr = xfrm_new(curr, XFRM_QUANTIZE, 1, &arg_f);
 			if (!curr)
 				die(1, "failed to allocate a new transformation\n", optarg);
 			if (!xfrm)
@@ -1656,7 +1663,7 @@ int main(int argc, char **argv)
 			if (arg_f <= 1)
 				die(1, "quantize levels must be > 1\n");
 
-			curr = xfrm_new(curr, XFRM_QFREQ, arg_f);
+			curr = xfrm_new(curr, XFRM_QFREQ, 1, &arg_f);
 			if (!curr)
 				die(1, "failed to allocate a new transformation\n", optarg);
 			if (!xfrm)
