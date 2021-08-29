@@ -1499,6 +1499,8 @@ int main(int argc, char **argv)
 	while (1) {
 		int option_index = 0;
 		int c = getopt_long(argc, argv, "hi:o:c:f:a:g:G:m:q:Q:d:HtnrM:S:F:P:w:A:", long_options, &option_index);
+		float arg_f = optarg ? atof(optarg) : 0.0;
+		int arg_i   = optarg ? atoi(optarg) : 0;
 
 		if (c == -1)
 			break;
@@ -1508,27 +1510,27 @@ int main(int argc, char **argv)
 			break;
 
 		case OPT_AUTO_CROP:
-			arg_auto_crop = atoi(optarg);
+			arg_auto_crop = arg_i;
 			break;
 
 		case OPT_CROP_BOTTOM:
-			cropy0 = atoi(optarg);
+			cropy0 = arg_i;
 			break;
 
 		case OPT_CROP_LEFT:
-			cropx0 = atoi(optarg);
+			cropx0 = arg_i;
 			break;
 
 		case OPT_CROP_RIGHT:
-			cropx1 = atoi(optarg);
+			cropx1 = arg_i;
 			break;
 
 		case OPT_CROP_TOP:
-			cropy1 = atoi(optarg);
+			cropy1 = arg_i;
 			break;
 
 		case OPT_SOFTEN:
-			curr = xfrm_new(curr, XFRM_SOFTEN, atof(optarg));
+			curr = xfrm_new(curr, XFRM_SOFTEN, arg_f);
 			if (!curr)
 				die(1, "failed to allocate a new transformation\n", optarg);
 			if (!xfrm)
@@ -1536,43 +1538,43 @@ int main(int argc, char **argv)
 			break;
 
 		case OPT_IMGW:
-			imgw = atof(optarg);
+			imgw = arg_f;
 			break;
 
 		case OPT_IMGH:
-			imgh = atof(optarg);
+			imgh = arg_f;
 			break;
 
 		case OPT_IMGD:
-			imgd = atof(optarg);
+			imgd = arg_f;
 			break;
 
 		case OPT_ORGX:
-			orgx = atof(optarg);
+			orgx = arg_f;
 			break;
 
 		case OPT_ORGY:
-			orgy = atof(optarg);
+			orgy = arg_f;
 			break;
 
 		case OPT_PIXW:
-			pixw = atof(optarg);
+			pixw = arg_f;
 			break;
 
 		case OPT_PIXH:
-			pixh = atof(optarg);
+			pixh = arg_f;
 			break;
 
 		case OPT_PIXS:
-			pixh = pixw = atof(optarg);
+			pixh = pixw = arg_f;
 			break;
 
 		case OPT_RL_SHIFT:
-			machine.rl_shift = atof(optarg);
+			machine.rl_shift = arg_f;
 			break;
 
 		case OPT_RL_DELAY:
-			machine.rl_delay = atof(optarg);
+			machine.rl_delay = arg_f;
 			break;
 
 		case OPT_LASER_ON:
@@ -1580,11 +1582,11 @@ int main(int argc, char **argv)
 			break;
 
 		case OPT_TEST:
-			test_sz = atoi(optarg);
+			test_sz = arg_i;
 			break;
 
 		case 'a':
-			curr = xfrm_new(curr, XFRM_ADD, atof(optarg));
+			curr = xfrm_new(curr, XFRM_ADD, arg_f);
 			if (!curr)
 				die(1, "failed to allocate a new transformation\n", optarg);
 			if (!xfrm)
@@ -1592,7 +1594,7 @@ int main(int argc, char **argv)
 			break;
 
 		case 'g':
-			curr = xfrm_new(curr, XFRM_GAM, atof(optarg));
+			curr = xfrm_new(curr, XFRM_GAM, arg_f);
 			if (!curr)
 				die(1, "failed to allocate a new transformation\n", optarg);
 			if (!xfrm)
@@ -1600,7 +1602,7 @@ int main(int argc, char **argv)
 			break;
 
 		case 'G':
-			curr = xfrm_new(curr, XFRM_GAM2, atof(optarg));
+			curr = xfrm_new(curr, XFRM_GAM2, arg_f);
 			if (!curr)
 				die(1, "failed to allocate a new transformation\n", optarg);
 			if (!xfrm)
@@ -1624,7 +1626,7 @@ int main(int argc, char **argv)
 			break;
 
 		case 'm':
-			curr = xfrm_new(curr, XFRM_MUL, atof(optarg));
+			curr = xfrm_new(curr, XFRM_MUL, arg_f);
 			if (!curr)
 				die(1, "failed to allocate a new transformation\n", optarg);
 			if (!xfrm)
@@ -1640,10 +1642,10 @@ int main(int argc, char **argv)
 			break;
 
 		case 'q':
-			if (atof(optarg) <= 1)
+			if (arg_f <= 1)
 				die(1, "quantize levels must be > 1\n");
 
-			curr = xfrm_new(curr, XFRM_QUANTIZE, atof(optarg));
+			curr = xfrm_new(curr, XFRM_QUANTIZE, arg_f);
 			if (!curr)
 				die(1, "failed to allocate a new transformation\n", optarg);
 			if (!xfrm)
@@ -1651,10 +1653,10 @@ int main(int argc, char **argv)
 			break;
 
 		case 'Q':
-			if (atof(optarg) <= 1)
+			if (arg_f <= 1)
 				die(1, "quantize levels must be > 1\n");
 
-			curr = xfrm_new(curr, XFRM_QFREQ, atof(optarg));
+			curr = xfrm_new(curr, XFRM_QFREQ, arg_f);
 			if (!curr)
 				die(1, "failed to allocate a new transformation\n", optarg);
 			if (!xfrm)
@@ -1662,7 +1664,7 @@ int main(int argc, char **argv)
 			break;
 
 		case 'd':
-			material.diffusion = atof(optarg);
+			material.diffusion = arg_f;
 			break;
 
 		case 'h':
@@ -1721,7 +1723,7 @@ int main(int argc, char **argv)
 				if (!passes)
 					passes = curr_pass;
 			}
-			curr_pass->feed = atoi(optarg);
+			curr_pass->feed = arg_i;
 			break;
 
 		case 'S':
@@ -1732,7 +1734,7 @@ int main(int argc, char **argv)
 				if (!passes)
 					passes = curr_pass;
 			}
-			curr_pass->spindle = atoi(optarg);
+			curr_pass->spindle = arg_i;
 			break;
 
 		case 'P':
@@ -1743,7 +1745,7 @@ int main(int argc, char **argv)
 				if (!passes)
 					passes = curr_pass;
 			}
-			curr_pass->passes = atoi(optarg);
+			curr_pass->passes = arg_i;
 			/* this completes the current pass */
 			last_pass = curr_pass;
 			curr_pass = NULL;
@@ -1752,10 +1754,10 @@ int main(int argc, char **argv)
 			arg_raw_preview = 1;
 			break;
 		case 'w':
-			machine.beam_w = atof(optarg);
+			machine.beam_w = arg_f;
 			break;
 		case 'A':
-			machine.x_accel = atof(optarg);
+			machine.x_accel = arg_f;
 			break;
 		case ':': /* missing argument */
 		case '?': /* unknown option */
