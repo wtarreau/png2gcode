@@ -80,6 +80,7 @@ const struct option long_options[] = {
 	{"gamma2",      required_argument, 0, 'G'              },
 	{"hash",        no_argument,       0, 'H'              },
 	{"twins",       no_argument,       0, 't'              },
+	{"vertical",    no_argument,       0, 'V'              },
 	{"diffuse",     required_argument, 0, 'd'              },
 	{"normalize",   no_argument,       0, 'n'              },
 	{"raw-preview", no_argument,       0, 'r'              },
@@ -126,6 +127,7 @@ enum xfrm_op {
 	XFRM_SOFTEN,    // args: 0=value
 	XFRM_QFREQ,     // args: 0=levels
 	XFRM_TWINS,     // args: none
+	XFRM_VERTICAL,  // args: none
 	XFRM_MAP,       // args: [from_min:from_max:]to_min:to_max[:gamma2]
 };
 
@@ -277,6 +279,7 @@ void usage(int code, const char *cmd)
 	    "  -G --gamma2 <value>          apply a centered gamma correction (def 1.0)\n"
 	    "  -H --hash                    hash the image by setting 50%% of the dots to intensity 0\n"
 	    "  -t --twins                   average adjacent pixels and send as opposed twins\n"
+	    "  -V --vertical                vertical stripes (optimal for cardboard)\n"
 	    "  -m --mul <value>             multiply intensity by <value>\n"
 	    "  -n --normalize               normalize work from 0.0 to 1.0\n"
 	    "  -q --quantize <levels>       quantize to <levels> levels\n"
@@ -858,7 +861,7 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 				}
 			}
 		}
-		else if (xfrm->op == XFRM_TWINS) {
+		else if (xfrm->op == XFRM_TWINS || xfrm->op == XFRM_VERTICAL) {
 			/* we need the average of two adjacent X pixels */
 			soften = malloc(img->h * img->w * sizeof(*soften));
 			if (!soften)
@@ -1005,6 +1008,32 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 							v = 1.0;
 						else
 							v = v - 1.0;
+					}
+					if (v < 0.0)
+						abort();
+					else if (v > 1.0)
+						abort();
+					break;
+
+				case XFRM_VERTICAL:
+					/* average two adjacent X pixels, use (0, 2x) for x<128, (2x-255,255) for x>=128 */
+					v = soften[p];
+
+					if (v < 0.0)
+						v = 0;
+					else if (v > 2.0)
+						v = 2.0;
+
+					if (v < 1.0) {
+						if (!(x & 1))
+							v = v; // strong pixel
+						else
+							v = 0; // soft pixel
+					} else {
+						if (!(x & 1))
+							v = 1.0; // strong pixel
+						else
+							v = v - 1.0; // soft pixel
 					}
 					if (v < 0.0)
 						abort();
@@ -1531,7 +1560,7 @@ int main(int argc, char **argv)
 
 	while (1) {
 		int option_index = 0;
-		int c = getopt_long(argc, argv, "hi:o:c:f:a:g:G:m:q:Q:d:HtnrM:S:F:P:w:A:", long_options, &option_index);
+		int c = getopt_long(argc, argv, "hi:o:c:f:a:g:G:m:q:Q:d:HtVnrM:S:F:P:w:A:", long_options, &option_index);
 		float arg_f = optarg ? atof(optarg) : 0.0;
 		int arg_i   = optarg ? atoi(optarg) : 0;
 
@@ -1702,6 +1731,14 @@ int main(int argc, char **argv)
 
 		case 't':
 			curr = xfrm_new(curr, XFRM_TWINS, 0, NULL);
+			if (!curr)
+				die(1, "failed to allocate a new transformation\n");
+			if (!xfrm)
+				xfrm = curr;
+			break;
+
+		case 'V':
+			curr = xfrm_new(curr, XFRM_VERTICAL, 0, NULL);
 			if (!curr)
 				die(1, "failed to allocate a new transformation\n");
 			if (!xfrm)
