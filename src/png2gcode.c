@@ -66,6 +66,7 @@ enum opt {
 	OPT_LASER_ON,
 	OPT_TEST,
 	OPT_MAP,
+	OPT_MAX_LENGTH,
 };
 
 const struct option long_options[] = {
@@ -111,6 +112,7 @@ const struct option long_options[] = {
 	{"laser-on",    required_argument, 0, OPT_LASER_ON     },
 	{"test",        required_argument, 0, OPT_TEST         },
 	{"map",         required_argument, 0, OPT_MAP          },
+	{"max-length",  required_argument, 0, OPT_MAX_LENGTH   },
 	{0,             0,                 0, 0                }
 };
 
@@ -129,6 +131,7 @@ enum xfrm_op {
 	XFRM_TWINS,     // args: none
 	XFRM_VERTICAL,  // args: none
 	XFRM_MAP,       // args: [from_min:from_max:]to_min:to_max[:gamma2]
+	XFRM_MAX_LENGTH,// args: 0=maxlen
 };
 
 struct xfrm {
@@ -286,6 +289,7 @@ void usage(int code, const char *cmd)
 	    "  -Q --qfreq <levels>          quantize to <levels> levels based on frequency\n"
 	    "     --soften <value>          subtract neighbors' average times <value>\n"
 	    "     --map <args[2..5]>        map values [from_min:from_max:]to_min:to_max[:gamma2]\n"
+	    "     --max-length <pixels>     limit long series for use with FS dithering (def: 0)\n"
 	    "Passes are used in G-CODE output format (-f gcode):\n"
 	    "  -M --mode    <mode>          pass mode (origin,x,y,axis,diag,frame,raster,raster-lr)\n"
 	    "  -F --feed    <value>         feed rate (mm/min, def:4800 frame, 1200 raster)\n"
@@ -1109,6 +1113,49 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 			}
 		}
 
+		if (xfrm->op == XFRM_MAX_LENGTH && (int)xfrm->args[0] > 0) {
+			for (y = 0; y < img->h; y++) {
+				int line_offset = (int)(((rand() & 255) / 255.0) * xfrm->args[0]);
+				float accumulator = 0.0;
+				float last = 0.0;
+				int length = 0;
+
+				for (x = (y & 1) ? (img->w - 1) : 0;
+				     (y & 1) ? (int)x >= 0 : x < img->w;
+				     x += (y & 1) ? -1 : 1) {
+					uint32_t p = y * img->w + x;
+					float v;
+					int x2;
+
+					/* only pixels of at least half intensity are limited */
+					img->work[p] += last;
+					v = img->work[p];
+					last = 0;
+
+					if (v < 0.5 || accumulator < 0.85)
+						length = 0;
+					else
+						length++;
+
+					accumulator = ((xfrm->args[0] - 1) * accumulator + v) / xfrm->args[0];
+
+					if (length >= (int)(xfrm->args[0])) {
+						/* too many consecutive pixels, remove a previous one */
+						x2 = (y & 1) ? x + line_offset : x - line_offset;
+						if (x2 < 0)
+							x2 = 0;
+						else if (x2 >= img->w)
+							x2 = img->w - 1;
+
+						last = img->work[y * img->w + x2];
+						img->work[y * img->w + x2] = 0;
+						length = 0;
+					}
+
+				}
+			}
+		}
+
 		free(soften);
 		soften = NULL;
 		free(freq);
@@ -1696,6 +1743,14 @@ int main(int argc, char **argv)
 				xfrm = curr;
 			break;
 		}
+
+		case OPT_MAX_LENGTH:
+			curr = xfrm_new(curr, XFRM_MAX_LENGTH, 1, &arg_f);
+			if (!curr)
+				die(1, "failed to allocate a new transformation\n");
+			if (!xfrm)
+				xfrm = curr;
+			break;
 
 		case 'a':
 			curr = xfrm_new(curr, XFRM_ADD, 1, &arg_f);
