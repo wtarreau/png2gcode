@@ -76,6 +76,7 @@ const struct option long_options[] = {
 	{"center",      required_argument, 0, 'c'              },
 	{"fmt",         required_argument, 0, 'f'              },
 	{"add",         required_argument, 0, 'a'              },
+	{"offset",      required_argument, 0, 'O'              },
 	{"mul",         required_argument, 0, 'm'              },
 	{"gamma",       required_argument, 0, 'g'              },
 	{"gamma2",      required_argument, 0, 'G'              },
@@ -132,6 +133,7 @@ enum xfrm_op {
 	XFRM_VERTICAL,  // args: none
 	XFRM_MAP,       // args: [from_min:from_max:]to_min:to_max[:gamma2]
 	XFRM_MAX_LENGTH,// args: 0=maxlen
+	XFRM_OFST,      // args: 0=value
 };
 
 struct xfrm {
@@ -278,6 +280,7 @@ void usage(int code, const char *cmd)
 	    "  -c, --center <mode>          auto-center output coordinates (N=none, A=axis, C=circle)\n"
 	    "Transformations are series of operations applied to the work area:\n"
 	    "  -a --add <value>             add <value> [-1..1] to the intensity\n"
+	    "  -O --offset <value>          add <value> [-1..1] to a non-zero intensity\n"
 	    "  -g --gamma <value>           apply abs value from bottom if >0 or from top if <0 (def 1.0)\n"
 	    "  -G --gamma2 <value>          apply a centered gamma correction (def 1.0)\n"
 	    "  -H --hash                    hash the image by setting 50%% of the dots to intensity 0\n"
@@ -952,6 +955,11 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 					v += xfrm->args[0];
 					break;
 
+				case XFRM_OFST:
+					if (v)
+						v += xfrm->args[0];
+					break;
+
 				case XFRM_MUL: /* negative inverts starting from 1.0 */
 					if (xfrm->args[0] >= 0.0)
 						v *= xfrm->args[0];
@@ -1607,7 +1615,7 @@ int main(int argc, char **argv)
 
 	while (1) {
 		int option_index = 0;
-		int c = getopt_long(argc, argv, "hi:o:c:f:a:g:G:m:q:Q:d:HtVnrM:S:F:P:w:A:", long_options, &option_index);
+		int c = getopt_long(argc, argv, "hi:o:c:f:a:O:g:G:m:q:Q:d:HtVnrM:S:F:P:w:A:", long_options, &option_index);
 		float arg_f = optarg ? atof(optarg) : 0.0;
 		int arg_i   = optarg ? atoi(optarg) : 0;
 
@@ -1754,6 +1762,14 @@ int main(int argc, char **argv)
 
 		case 'a':
 			curr = xfrm_new(curr, XFRM_ADD, 1, &arg_f);
+			if (!curr)
+				die(1, "failed to allocate a new transformation\n");
+			if (!xfrm)
+				xfrm = curr;
+			break;
+
+		case 'O':
+			curr = xfrm_new(curr, XFRM_OFST, 1, &arg_f);
 			if (!curr)
 				die(1, "failed to allocate a new transformation\n");
 			if (!xfrm)
