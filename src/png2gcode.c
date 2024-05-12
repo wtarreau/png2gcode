@@ -347,6 +347,7 @@ void usage(int code, const char *cmd)
 	    "  - for images, use -H for wood or -t on aluminum\n"
 	    "  - when creating output from text, use -m -1 to invert the input first, or\n"
 	    "    use --text-fg-value 0 to change the foreground instead\n"
+	    "  - for pure text, -d0 is recommended to sharpen the text\n"
 	    "\n", cmd);
 }
 
