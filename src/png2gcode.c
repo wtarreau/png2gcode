@@ -71,6 +71,12 @@ enum opt {
 	OPT_EXT_LEFT,
 	OPT_EXT_RIGHT,
 	OPT_EXT_TOP,
+	OPT_TEXT_FG_ALPHA,
+	OPT_TEXT_FG_VALUE,
+	OPT_TEXT_BG_ALPHA,
+	OPT_TEXT_BG_VALUE,
+	OPT_TEXT_ZOOM,
+	OPT_TEXT,
 };
 
 const struct option long_options[] = {
@@ -122,6 +128,12 @@ const struct option long_options[] = {
 	{"test",        required_argument, 0, OPT_TEST         },
 	{"map",         required_argument, 0, OPT_MAP          },
 	{"max-length",  required_argument, 0, OPT_MAX_LENGTH   },
+	{"text-fg-alpha", required_argument, 0, OPT_TEXT_FG_ALPHA },
+	{"text-fg-value", required_argument, 0, OPT_TEXT_FG_VALUE },
+	{"text-bg-alpha", required_argument, 0, OPT_TEXT_BG_ALPHA },
+	{"text-bg-value", required_argument, 0, OPT_TEXT_BG_VALUE },
+	{"text-zoom",   required_argument, 0, OPT_TEXT_ZOOM    },
+	{"text",        required_argument, 0, OPT_TEXT         },
 	{0,             0,                 0, 0                }
 };
 
@@ -142,11 +154,13 @@ enum xfrm_op {
 	XFRM_MAP,       // args: [from_min:from_max:]to_min:to_max[:gamma2]
 	XFRM_MAX_LENGTH,// args: 0=maxlen
 	XFRM_OFST,      // args: 0=value
+	XFRM_TEXT,      // args: 0=xalign(-1,0,1) 1=yalign, 2=#lines, 3=zoom, 4=fgalpha, 5=fgcol, 6=bgalpha, 7=bgcol
 };
 
 struct xfrm {
 	enum xfrm_op op;
 	float args[MAX_XFRM_ARGS];
+	char *text;
 	struct xfrm *next;
 };
 
@@ -305,6 +319,12 @@ void usage(int code, const char *cmd)
 	    "     --soften <value>          subtract neighbors' average times <value>\n"
 	    "     --map <args[2..5]>        map values [from_min:from_max:]to_min:to_max[:gamma2]\n"
 	    "     --max-length <pixels>     limit long series for use with FS dithering (def: 0)\n"
+	    "     --text-fg-value <value>   set FG value for future text (def: 1.0)\n"
+	    "     --text-fg-alpha <value>   set FG alpha for future text (def: 1.0)\n"
+	    "     --text-bg-value <value>   set BG value for future text (def: 0.0)\n"
+	    "     --text-bg-alpha <value>   set BG alpha for future text (def: 0.0)\n"
+	    "     --text-zoom <int>         set integer zoom value for future text (def: 1)\n"
+	    "     --text [@<align>:]<msg>   write/append <msg>. align=[{bct}][{lcr}]\n"
 	    "Passes are used in G-CODE output format (-f gcode):\n"
 	    "  -M --mode    <mode>          pass mode (origin,x,y,axis,diag,frame,raster,raster-lr)\n"
 	    "  -F --feed    <value>         feed rate (mm/min, def:4800 frame, 1200 raster)\n"
@@ -692,6 +712,83 @@ struct xfrm *xfrm_new(struct xfrm *curr, enum xfrm_op op, unsigned nbargs, const
 
 	if (curr)
 		curr->next = new;
+	return new;
+}
+
+/* append a text-based transformation to list <curr> */
+struct xfrm *xfrm_new_text(struct xfrm *curr, enum xfrm_op op, const char *msg, unsigned zoom, float fg_alpha, float fg_value, float bg_alpha, float bg_value)
+{
+	int xalign = 0, yalign = 0;
+	struct xfrm *new = curr;
+	const char *p = msg;
+	int lines = 1;
+
+	if (curr && curr->op == op) {
+		xalign = curr->args[0];
+		yalign = curr->args[1];
+	}
+
+	if (*p == '@') {
+		switch (p[1]) {
+		case 'b': yalign = -1; p++; break;
+		case 'c': yalign =  0; p++; break;
+		case 't': yalign =  1; p++; break;
+		}
+		switch (p[1]) {
+		case 'l': xalign = -1; p++; break;
+		case 'c': xalign =  0; p++; break;
+		case 'r': xalign =  1; p++; break;
+		}
+		while (p[1] != ':')
+			p++;
+		if (p[1] == ':')
+			p++;
+		msg = p + 1;
+	}
+
+	if (!curr || op != curr->op ||
+	    xalign != curr->args[0] || yalign != curr->args[1] || zoom != curr->args[3] ||
+	    fg_alpha != curr->args[4] || fg_value != curr->args[5] ||
+	    bg_alpha != curr->args[6] || bg_value != curr->args[7]) {
+		new = calloc(1, sizeof(*new));
+		if (!new)
+			return NULL;
+
+		if (curr)
+			curr->next = new;
+	}
+
+	/* count lines */
+	p = msg - 1;
+	while ((p = strchr(p + 1, '\n')))
+		lines++;
+
+	/* fill/update xfrm */
+	new->op       = op;
+	new->args[0]  = xalign;
+	new->args[1]  = yalign;
+	new->args[2] += lines;
+	new->args[3]  = zoom;
+	new->args[4]  = fg_alpha;
+	new->args[5]  = fg_value;
+	new->args[6]  = bg_alpha;
+	new->args[7]  = bg_value;
+	if (!new->text) {
+		new->text = strdup(msg);
+	}
+	else {
+		size_t size = strlen(new->text) + 1 + strlen(msg) + 1;
+		char *txt = malloc(size);
+
+		if (!txt) {
+			if (new != curr)
+				free(new);
+			return NULL;
+		}
+		snprintf(txt, size, "%s\n%s", new->text, msg);
+		free(new->text);
+		new->text = txt;
+	}
 	return new;
 }
 
@@ -1671,8 +1768,11 @@ int main(int argc, char **argv)
 	float pixw = 0, pixh = 0, imgw = 0, imgh = 0, imgd = 0, orgx = 0, orgy = 0;
 	int cropx0 = 0, cropy0 = 0, cropx1 = 0, cropy1 = 0, test_sz = 0;
 	int ext_l = 0, ext_r = 0, ext_t = 0, ext_b = 0;
+	float text_fg_alpha = 1.0, text_fg_value = 1.0;
+	float text_bg_alpha = 0, text_bg_value = 0;
 	uint32_t arg_auto_crop = 0;
 	int arg_raw_preview = 0;
+	int text_zoom = 1;
 	enum out_center center_mode = OUT_CNT_NONE;
 	enum out_fmt fmt = OUT_FMT_NONE;
 	struct pass *curr_pass = NULL;
@@ -1731,6 +1831,34 @@ int main(int argc, char **argv)
 
 		case OPT_EXT_TOP:
 			ext_t = arg_i;
+			break;
+
+		case OPT_TEXT_ZOOM:
+			text_zoom = arg_i;
+			break;
+
+		case OPT_TEXT_FG_ALPHA:
+			text_fg_alpha = arg_f;
+			break;
+
+		case OPT_TEXT_FG_VALUE:
+			text_fg_value = arg_f;
+			break;
+
+		case OPT_TEXT_BG_ALPHA:
+			text_bg_alpha = arg_f;
+			break;
+
+		case OPT_TEXT_BG_VALUE:
+			text_bg_value = arg_f;
+			break;
+
+		case OPT_TEXT:
+			curr = xfrm_new_text(curr, XFRM_TEXT, optarg, text_zoom, text_fg_alpha, text_fg_value, text_bg_alpha, text_bg_value);
+			if (!curr)
+				die(1, "failed to allocate a new transformation\n");
+			if (!xfrm)
+				xfrm = curr;
 			break;
 
 		case OPT_SOFTEN:
