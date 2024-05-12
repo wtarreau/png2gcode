@@ -345,6 +345,8 @@ void usage(int code, const char *cmd)
 	    "     --laser-on <cmd>          command to turn laser ON (def:M4)\n"
 	    "Notes:\n"
 	    "  - for images, use -H for wood or -t on aluminum\n"
+	    "  - when creating output from text, use -m -1 to invert the input first, or\n"
+	    "    use --text-fg-value 0 to change the foreground instead\n"
 	    "\n", cmd);
 }
 
@@ -1086,6 +1088,56 @@ int find_center(struct image *img, float *outx, float *outy, float *outrad)
 	return ret;
 }
 
+/* Measure the max width and height of text by cumulating L/C/R and T/C/B, by
+ * scanning all xfrm_text.
+ */
+void measure_text_size(struct xfrm *xfrm, int *width, int *height)
+{
+	int l_w, c_w, r_w;
+	int t_h, c_h, b_h;
+	int w, wmax, h;
+	char *line, *next;
+
+	*width = *height = 0;
+	l_w = c_w = r_w = t_h = c_h = b_h = 0;
+	while (xfrm) {
+		if (xfrm->op == XFRM_TEXT) {
+			h = xfrm->args[2] * xfrm->args[3] * TEXT_HEIGHT; // lines * zoom
+			if (xfrm->args[1] < 0 && b_h < h)       // yalign == bottom
+				b_h = h;
+			else if (xfrm->args[1] == 0 && c_h < h) // yalign == center
+				c_h = h;
+			else if (xfrm->args[1] > 0 && t_h < h)  // yalign == top
+				t_h = h;
+
+			line = next = xfrm->text;
+			for (w = wmax = 0; *line; line = next) {
+				next = strchr(line, '\n');
+				if (!next)
+					next = line + strlen(line);
+				w = next - line;
+				if (w > wmax)
+					wmax = w;
+				if (*next)
+					next++;
+				line = next;
+			}
+
+			w = wmax * xfrm->args[3] * TEXT_HEIGHT; // cols * zoom
+			if (xfrm->args[0] < 0 && l_w < w)       // xalign == left
+				l_w = w;
+			else if (xfrm->args[0] == 0 && c_w < w) // xalign == center
+				c_w = w;
+			else if (xfrm->args[0] > 0 && r_w < w)  // xalign == right
+				r_w = w;
+		}
+		xfrm = xfrm->next;
+	}
+
+	/* OK let's write this back now */
+	*width = l_w + c_w + r_w;
+	*height = b_h + c_h + t_h;
+}
 /* apply transformations starting at <xfrm> to image <img>. Return non-zero on
  * success, zero on failure.
  */
@@ -1871,6 +1923,7 @@ int main(int argc, char **argv)
 	uint32_t arg_auto_crop = 0;
 	int arg_raw_preview = 0;
 	int text_zoom = 1;
+	int txt_w, txt_h;
 	enum out_center center_mode = OUT_CNT_NONE;
 	enum out_fmt fmt = OUT_FMT_NONE;
 	struct pass *curr_pass = NULL;
@@ -2272,10 +2325,13 @@ int main(int argc, char **argv)
 	if (optind < argc)
 		die(1, "unknown argument %s\n", argv[optind]);
 
-	if (!in && !test_sz && !((ext_r+ext_l) && (ext_b+ext_t))) {
+	measure_text_size(xfrm, &txt_w, &txt_h);
+
+	if (!in && !test_sz && !((ext_r+ext_l) && (ext_b+ext_t)) && !(txt_w && txt_h)) {
 		die(1,
 		    "Missing mandatory PNG input file name (-i file), or test pattern (--test),\n"
-		    "or create an empty area using --ext-{left,right} and --ext-{bottom,top}.\n"
+		    "or text (--text). Alternately you may create an empty area using\n"
+		    "--ext-{left,right} and --ext-{bottom,top}.\n"
 		    "Use -h for help.\n");
 	}
 
@@ -2325,9 +2381,14 @@ int main(int argc, char **argv)
 	    !crop_gray_image(&img, cropx0, cropy0, img.w - 1 - cropx1, img.h - 1 - cropy1))
 		die(4, "failed to crop image\n");
 
-	if ((ext_l || ext_r || ext_t || ext_b) &&
-	    !extend_gray_image(&img, ext_l, ext_r, ext_t, ext_b))
-		die(4, "failed to extend image\n");
+	if (ext_l || ext_r || ext_t || ext_b) {
+		if (!extend_gray_image(&img, ext_l, ext_r, ext_t, ext_b))
+			die(4, "failed to extend image\n");
+	}
+	else if (!img.w && !img.h && txt_w && txt_h) {
+		if (!extend_gray_image(&img, 0, txt_w, txt_h, 0))
+			die(4, "failed to extend image to text size\n");
+	}
 
 	if (imgw && !imgh)
 		imgh = imgw * img.h / img.w;
