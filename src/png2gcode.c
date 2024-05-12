@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <png.h>
+#include "font5x7.h"
 
 /* default spindle level and feed rate in g-code mode. */
 #define DEFAULT_SPINDLE_SHOW     1
@@ -17,6 +18,10 @@
 
 /* max number of arguments for a transformation */
 #define MAX_XFRM_ARGS 10
+
+/* 5x7 fonts give 6x8 as we keep one pixel around */
+#define TEXT_HEIGHT 8
+#define TEXT_WIDTH 6
 
 struct image {
 	uint32_t w;    // width in pixels
@@ -792,6 +797,99 @@ struct xfrm *xfrm_new_text(struct xfrm *curr, enum xfrm_op op, const char *msg, 
 	return new;
 }
 
+/* Apply text described in <xfrm> to image <img> */
+void xfrm_text(struct image *img, struct xfrm *xfrm)
+{
+	char *line, *next;
+	int lines, linenum;
+	int xalign, yalign, zoom;
+	float fg_alpha, fg_value, bg_alpha, bg_value;
+	int xinit, yinit, xchar, x, y;
+	int width;
+
+	if (xfrm->op != XFRM_TEXT)
+		return;
+
+	xalign = xfrm->args[0];
+	yalign = xfrm->args[1];
+	lines = xfrm->args[2];
+	zoom = xfrm->args[3];
+	fg_alpha = xfrm->args[4];
+	fg_value = xfrm->args[5];
+	bg_alpha = xfrm->args[6];
+	bg_value = xfrm->args[7];
+
+	if (yalign < 0) // bottom
+		yinit = lines * zoom * TEXT_HEIGHT - 1;
+	else if (yalign == 0) // center
+		yinit = img->h / 2 + lines * zoom * TEXT_HEIGHT / 2 - 1;
+	else // top
+		yinit = img->h - 1;
+
+	if (xalign < 0) // left
+		xinit = 0;
+	else if (xalign == 0) // center (will be adjusted for each line)
+		xinit = img->w / 2;
+	else // right
+		xinit = img->w; // text length will be subtracted
+
+	line = next = xfrm->text;
+	for (linenum = 0; linenum < lines; linenum++) {
+		next = strchr(line, '\n');
+		if (!next)
+			next = line + strlen(line);
+		if (yinit < zoom * TEXT_HEIGHT - 1 || yinit >= img->h)
+			goto skip;
+
+		/* we're going to print between line and next-1 */
+		width = next - line;
+		if (xalign < 0)
+			xchar = 0;
+		else if (xalign == 0)
+			xchar = xinit - width * zoom * TEXT_WIDTH / 2;
+		else
+			xchar = xinit - width * zoom * TEXT_WIDTH;
+
+		while (xchar < 0) {
+			xchar += zoom * TEXT_WIDTH;
+			line++;
+		}
+
+		while (line < next) {
+			char c = *line++;
+
+			if (xchar > img->w - zoom * TEXT_WIDTH)
+				break;
+
+			if (c < 0x20 || c > 0x7f)
+				c = 0x20;
+			c -= 0x20;
+
+			for (y = 0; y < zoom * TEXT_HEIGHT; y++) {
+				if (y >= zoom * (TEXT_HEIGHT - 1) && !linenum)
+					break;
+				for (x = 0; x < zoom * TEXT_WIDTH; x++) {
+					if (x >= zoom * (TEXT_WIDTH - 1) && line >= next)
+						break;
+					if (x < zoom * (TEXT_WIDTH - 1) && y < zoom * (TEXT_HEIGHT - 1) &&
+					    font5x7[(uint8_t)c][y / zoom] & (1 << ((TEXT_WIDTH - 2) - (x / zoom))))
+						img->work[(yinit - y) * img->w + xchar + x] =
+							img->work[(yinit - y) * img->w + xchar + x] * (1.0 - fg_alpha) + fg_alpha * fg_value;
+					else
+						img->work[(yinit - y) * img->w + xchar + x] =
+							img->work[(yinit - y) * img->w + xchar + x] * (1.0 - bg_alpha) + bg_alpha * bg_value;
+				}
+			}
+			xchar += zoom * TEXT_WIDTH;
+		}
+	skip:
+		yinit -= zoom * TEXT_HEIGHT;
+		if (*next)
+			next++;
+		line = next;
+	}
+}
+
 /* try to figure the center of the smallest circle including all pixels,
  * returns it as well as the computed radius in non-null pointers. Returns
  * non-zero on success.
@@ -1110,6 +1208,9 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 			//for (q = 0; q < 1024; q++) {
 			//	printf("%u: %u (%f)\n", q, freq[q], (double)freq[q]/freq[1023]);
 			//}
+		}
+		else if (xfrm->op == XFRM_TEXT) {
+			xfrm_text(img, xfrm);
 		}
 
 		for (y = 0; y < img->h; y++) {
