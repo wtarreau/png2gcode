@@ -570,7 +570,7 @@ int work_to_gray(struct image *img, int raw)
  * First columns and rows are numbered zero. Returns non-zero on success, 0 on
  * failure. x0, x1, y0, y1 must be within the original buffer dimensions, with
  * x0<=x1, y0<=y1. The image's w and h are updated. The buffer is rearranged
- * but the extra size is not released.
+ * and the extra area is released. Note that the img->area pointer may change.
  */
 int crop_gray_image(struct image *img, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1)
 {
@@ -601,6 +601,12 @@ int crop_gray_image(struct image *img, uint32_t x0, uint32_t y0, uint32_t x1, ui
 
 	img->w = x1 - x0 + 1;
 	img->h = y1 - y0 + 1;
+
+	dst = realloc(img->gray, img->w * img->h * sizeof(*img->gray));
+	if (!dst)
+		return 0;
+
+	img->gray = dst;
 	return 1;
 }
 
