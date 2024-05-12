@@ -1550,11 +1550,20 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 		fprintf(file, "; Center: 0,0, Max radius: %.7g mm, Diameter: %.7g mm\n", f4(img->diam / 2), f4(img->diam));
 	fprintf(file, "; Total of %d passes\n", pass_cnt);
 	if (argc > 0) {
-		int a;
+		int a, c;
+		char *p;
 
 		fprintf(file, "; command line:");
-		for (a = 0; a < argc; a++)
-			fprintf(file, " %s", argv[a]);
+		for (a = 0; a < argc; a++) {
+			p = argv[a];
+			fputc(' ', file);
+			while ((c = *p++)) {
+				if (c <= ' ' || c == '\'' || c == '$' || c == '"' || c == '\\' || c >= 0x7f)
+					fprintf(file, "$'\\x%02x'", c);
+				else
+					fputc(c, file);
+			}
+		}
 		fputc('\n', file);
 	}
 
