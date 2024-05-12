@@ -345,8 +345,7 @@ void usage(int code, const char *cmd)
 	    "     --laser-on <cmd>          command to turn laser ON (def:M4)\n"
 	    "Notes:\n"
 	    "  - for images, use -H for wood or -t on aluminum\n"
-	    "  - when creating output from text, use -m -1 to invert the input first, or\n"
-	    "    use --text-fg-value 0 to change the foreground instead\n"
+	    "  - an empty image may be created from just text\n"
 	    "  - for pure text, -d0 is recommended to sharpen the text\n"
 	    "\n", cmd);
 }
@@ -660,6 +659,7 @@ int extend_gray_image(struct image *img, int l, int r, int t, int b)
 	uint8_t *src, *dst;
 	int x, y;
 	int nw, nh;
+	int fill = 255; // fill color = white
 
 	nw = l + img->w + r;
 	nh = t + img->h + b;
@@ -673,7 +673,7 @@ int extend_gray_image(struct image *img, int l, int r, int t, int b)
 	 * to add the missing pixels.
 	 */
 	if (t)
-		memset(img->gray + (b + img->h) * nw * sizeof(*img->gray), 0, t * nw * sizeof(*img->gray));
+		memset(img->gray + (b + img->h) * nw * sizeof(*img->gray), fill, t * nw * sizeof(*img->gray));
 
 	/* process existing lines, possibly padded */
 	for (y = b + img->h - 1; y >= b; y--) {
@@ -681,18 +681,18 @@ int extend_gray_image(struct image *img, int l, int r, int t, int b)
 		dst = img->gray + y * nw + nw - 1;
 		// right padding
 		for (x = nw - 1; x >= (int)(l + img->w); x--)
-			*dst-- = 0;
+			*dst-- = fill;
 		// copy
 		for (; x >= l; x--)
 			*dst-- = *src--;
 		// left padding
 		for (; x >= 0; x--)
-			*dst-- = 0;
+			*dst-- = fill;
 	}
 
 	/* optionally pad the top*/
 	if (b)
-		memset(img->gray, 0, b * nw * sizeof(*img->gray));
+		memset(img->gray, fill, b * nw * sizeof(*img->gray));
 
 	img->w = nw;
 	img->h = nh;
