@@ -338,7 +338,7 @@ void usage(int code, const char *cmd)
 	    "Material characteristics:\n"
 	    "  -d --diffuse <ratio>         adjacent radiation for hash & soften (def:0.18)\n"
 	    "Machine settings:\n"
-	    "  -w --beam-width <mm>         beam width in millimeters (def: 0, max:90% pxw, neg=alt)\n"
+	    "  -w --beam-width <mm>         beam width in millimeters (def: 0, max:90%% pxw, neg=alt)\n"
 	    "  -A --x-accel <mm>            X axis acceleration distance in millimeters (def: 0)\n"
 	    "     --rl-shift <millimeters>  offset to apply to R->L path in raster mode (def:0)\n"
 	    "     --rl-delay <millisec>     time offset to apply to R->L path in raster mode (def:0)\n"
