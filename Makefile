@@ -18,9 +18,10 @@ CFLAGS     := $(OPT_CFLAGS) $(CPU_CFLAGS) $(DEB_CFLAGS) $(DEF_CFLAGS) $(USR_CFLA
 LD         := $(CC)
 DEB_LFLAGS := -g
 USR_LFLAGS :=
-LIB_LFLAGS := -lm -lpng
 THR_LFLAGS :=
-LDFLAGS    := $(DEB_LFLAGS) $(USR_LFLAGS) $(LIB_LFLAGS) $(THR_LFLAGS)
+LDFLAGS    := $(DEB_LFLAGS) $(USR_LFLAGS) $(THR_LFLAGS)
+
+LIB_LFLAGS := -lm -lpng
 
 AR         := $(CROSS_COMPILE)ar
 STRIP      := $(CROSS_COMPILE)strip
@@ -39,7 +40,7 @@ shared: $(SHARED)
 tools: $(BINS)
 
 %: %.o
-	$(LD) $(LDFLAGS) -o $@ $^
+	$(LD) $(LDFLAGS) -o $@ $^ $(LIB_LFLAGS)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -o $@ -c $<
@@ -53,3 +54,6 @@ install-tools: tools
 
 clean:
 	-rm -f $(BINS) $(OBJS) *.o *~
+
+# disable implicit rules
+.SUFFIXES:
