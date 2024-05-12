@@ -67,6 +67,10 @@ enum opt {
 	OPT_TEST,
 	OPT_MAP,
 	OPT_MAX_LENGTH,
+	OPT_EXT_BOTTOM,
+	OPT_EXT_LEFT,
+	OPT_EXT_RIGHT,
+	OPT_EXT_TOP,
 };
 
 const struct option long_options[] = {
@@ -95,11 +99,15 @@ const struct option long_options[] = {
 	{"beam-width",  required_argument, 0, 'w'              },
 	{"x-accel",     required_argument, 0, 'A'              },
 	{"soften",      required_argument, 0, OPT_SOFTEN       },
+	{"auto-crop",   required_argument, 0, OPT_AUTO_CROP    },
 	{"crop-bottom", required_argument, 0, OPT_CROP_BOTTOM  },
 	{"crop-left",   required_argument, 0, OPT_CROP_LEFT    },
 	{"crop-right",  required_argument, 0, OPT_CROP_RIGHT   },
 	{"crop-top",    required_argument, 0, OPT_CROP_TOP     },
-	{"auto-crop",   required_argument, 0, OPT_AUTO_CROP    },
+	{"ext-bottom",  required_argument, 0, OPT_EXT_BOTTOM   },
+	{"ext-left",    required_argument, 0, OPT_EXT_LEFT     },
+	{"ext-right",   required_argument, 0, OPT_EXT_RIGHT    },
+	{"ext-top",     required_argument, 0, OPT_EXT_TOP      },
 	{"image-width", required_argument, 0, OPT_IMGW         },
 	{"image-height",required_argument, 0, OPT_IMGH         },
 	{"image-diam",  required_argument, 0, OPT_IMGD         },
@@ -267,6 +275,10 @@ void usage(int code, const char *cmd)
 	    "     --crop-left   <size>      crop this number of pixels from the left\n"
 	    "     --crop-right  <size>      crop this number of pixels from the right\n"
 	    "     --crop-top    <size>      crop this number of pixels from the top\n"
+	    "     --ext-bottom  <size>      extend by this number of pixels on the bottom\n"
+	    "     --ext-left    <size>      extend by this number of pixels on the left\n"
+	    "     --ext-right   <size>      extend by this number of pixels on the right\n"
+	    "     --ext-top     <size>      extend by this number of pixels on the top\n"
 	    "     --test <size>             generate a test pattern this size instead of input\n"
 	    "  -o --out <file>              output file name\n"
 	    "     --image-width  <size>     image width in millimeters (default: automatic)\n"
@@ -607,6 +619,58 @@ int crop_gray_image(struct image *img, uint32_t x0, uint32_t y0, uint32_t x1, ui
 		return 0;
 
 	img->gray = dst;
+	return 1;
+}
+
+/* extend gray image <img>, by <l> pixels on the left, <r> pixels on the right,
+ * <t> pixels at the top, <b> pixels at the bottom. The area will be
+ * reallocated if needed. Returns non-zero on success, 0 on failure. The
+ * image's w and h are updated.
+ */
+int extend_gray_image(struct image *img, int l, int r, int t, int b)
+{
+	uint8_t *src, *dst;
+	int x, y;
+	int nw, nh;
+
+	if (!img->gray)
+		return 0;
+
+	nw = l + img->w + r;
+	nh = t + img->h + b;
+	dst = realloc(img->gray, nw * nh * sizeof(*img->gray));
+	if (!dst)
+		return 0;
+
+	img->gray = dst;
+
+	/* The image remains packed at the top, so let's start from the end
+	 * to add the missing pixels.
+	 */
+	if (t)
+		memset(img->gray + (b + img->h) * nw * sizeof(*img->gray), 0, t * nw * sizeof(*img->gray));
+
+	/* process existing lines, possibly padded */
+	for (y = b + img->h - 1; y >= b; y--) {
+		src = img->gray + (y - b) * img->w + (img->w - 1);
+		dst = img->gray + y * nw + nw - 1;
+		// right padding
+		for (x = nw - 1; x >= (int)(l + img->w); x--)
+			*dst-- = 0;
+		// copy
+		for (; x >= l; x--)
+			*dst-- = *src--;
+		// left padding
+		for (; x >= 0; x--)
+			*dst-- = 0;
+	}
+
+	/* optionally pad the top*/
+	if (b)
+		memset(img->gray, 0, b * nw * sizeof(*img->gray));
+
+	img->w = nw;
+	img->h = nh;
 	return 1;
 }
 
@@ -1606,6 +1670,7 @@ int main(int argc, char **argv)
 {
 	float pixw = 0, pixh = 0, imgw = 0, imgh = 0, imgd = 0, orgx = 0, orgy = 0;
 	int cropx0 = 0, cropy0 = 0, cropx1 = 0, cropy1 = 0, test_sz = 0;
+	int ext_l = 0, ext_r = 0, ext_t = 0, ext_b = 0;
 	uint32_t arg_auto_crop = 0;
 	int arg_raw_preview = 0;
 	enum out_center center_mode = OUT_CNT_NONE;
@@ -1650,6 +1715,22 @@ int main(int argc, char **argv)
 
 		case OPT_CROP_TOP:
 			cropy1 = arg_i;
+			break;
+
+		case OPT_EXT_BOTTOM:
+			ext_b = arg_i;
+			break;
+
+		case OPT_EXT_LEFT:
+			ext_l = arg_i;
+			break;
+
+		case OPT_EXT_RIGHT:
+			ext_r = arg_i;
+			break;
+
+		case OPT_EXT_TOP:
+			ext_t = arg_i;
 			break;
 
 		case OPT_SOFTEN:
@@ -2013,6 +2094,10 @@ int main(int argc, char **argv)
 	if ((cropx0 || cropy0 || cropx1 || cropy1) &&
 	    !crop_gray_image(&img, cropx0, cropy0, img.w - 1 - cropx1, img.h - 1 - cropy1))
 		die(4, "failed to crop image\n");
+
+	if ((ext_l || ext_r || ext_t || ext_b) &&
+	    !extend_gray_image(&img, ext_l, ext_r, ext_t, ext_b))
+		die(4, "failed to extend image\n");
 
 	if (imgw && !imgh)
 		imgh = imgw * img.h / img.w;
