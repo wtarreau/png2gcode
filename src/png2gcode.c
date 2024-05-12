@@ -658,9 +658,6 @@ int extend_gray_image(struct image *img, int l, int r, int t, int b)
 	int x, y;
 	int nw, nh;
 
-	if (!img->gray)
-		return 0;
-
 	nw = l + img->w + r;
 	nh = t + img->h + b;
 	dst = realloc(img->gray, nw * nh * sizeof(*img->gray));
@@ -2275,8 +2272,12 @@ int main(int argc, char **argv)
 	if (optind < argc)
 		die(1, "unknown argument %s\n", argv[optind]);
 
-	if (!in && !test_sz)
-		die(1, "missing mandatory PNG input file name (-i file).\nUse -h for help.\n");
+	if (!in && !test_sz && !((ext_r+ext_l) && (ext_b+ext_t))) {
+		die(1,
+		    "Missing mandatory PNG input file name (-i file), or test pattern (--test),\n"
+		    "or create an empty area using --ext-{left,right} and --ext-{bottom,top}.\n"
+		    "Use -h for help.\n");
+	}
 
 	if (fmt == OUT_FMT_PNG && !out)
 		die(1, "missing mandatory PNG output file name (-o file).\nUse -h for help.\n");
@@ -2302,7 +2303,7 @@ int main(int argc, char **argv)
 		/* generate a test pattern this size */
 		if (!generate_test_pattern(&img, test_sz, test_sz))
 			die(2, "failed to generate test pattern.\n");
-	} else {
+	} else if (in) {
 		if (!read_rgba_file(in, &img))
 			die(2, "failed to read file %s\n", in);
 
