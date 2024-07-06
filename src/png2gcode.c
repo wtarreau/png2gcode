@@ -1558,8 +1558,14 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 			p = argv[a];
 			fputc(' ', file);
 			while ((c = *p++)) {
-				if (c <= ' ' || c == '\'' || c == '$' || c == '"' || c == '\\' || c >= 0x7f)
+				/* fully escape unprintable characters */
+				if (c < ' ' || c == '\'' || c == '\\' || c >= 0x7F)
 					fprintf(file, "$'\\x%02x'", c);
+				/* quote regular shell delimiters */
+				else if ((c >= 0x20 && c <= 0x2a) || c == ';' || c == '?' ||
+					 c == '<' || c == '>' || c == '[' || c == ']' ||
+					 c == '`' || c == '{' || c == '}' || c == '|' || c == '~')
+					fprintf(file, "'%c'", c);
 				else
 					fputc(c, file);
 			}
