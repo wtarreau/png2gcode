@@ -1799,11 +1799,12 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 						if (spindle)
 							xl = xr;
 
-						if (br > 0.0 && curr_spindle) {
+						if (br > 0.0 && curr_spindle > spindle) {
 							/* finish previous pixel to avoid a burn */
 							fprintf(file, "X%.7g S%d\n", f4(img->orgx+xr-br+beam_ofs), curr_spindle);
-							curr_spindle = 0;
-							x0 = x;
+							curr_spindle = spindle;
+							if (!spindle)
+								x0 = x;
 						}
 
 						if (spindle == curr_spindle)
@@ -1870,11 +1871,12 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 						if (spindle)
 							xl = xr;
 
-						if (br > 0.0 && curr_spindle) {
+						if (br > 0.0 && curr_spindle > spindle) {
 							/* finish previous pixel to avoid a burn */
 							fprintf(file, "X%.7g S%d\n", f4(img->orgx + xr + rl_shift + br + beam_ofs), curr_spindle);
-							curr_spindle = 0;
-							x0 = x;
+							curr_spindle = spindle;
+							if (!spindle)
+								x0 = x;
 						}
 
 						if (spindle == curr_spindle)
@@ -1896,7 +1898,7 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 							if (machine.x_accel)
 								fprintf(file, "X%.7g S0\n", f4(img->orgx + xr + rl_shift - br + beam_ofs));
 						} else
-							fprintf(file, "X%.7g S%d\n", f4(img->orgx + xr + br + beam_ofs + rl_shift), curr_spindle);
+							fprintf(file, "X%.7g S%d\n", f4(img->orgx + xr - br + beam_ofs + rl_shift), curr_spindle);
 
 						curr_spindle = spindle;
 						if (!spindle)
