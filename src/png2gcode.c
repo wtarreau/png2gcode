@@ -1793,6 +1793,16 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 				 * direction, "from" is the previous x (or x0) and "to" is
 				 * x. In R->L, the spindle is given by pixel x-1.
 				 *
+				 * If the machine's beam width is set to a non-null value, the
+				 * engraving will only occur starting at the beam's radius (half
+				 * of the width) and finishing before the end minus the beam's
+				 * radius. In order to limit burns, this is only applied to pixels
+				 * that are stronger than their predecessor or successor, unless the
+				 * uniform beam width is enabled, in which case every dot is followed
+				 * by a zero intensity line to complete the pixel. Example:
+				 * Beam width: ((|))         |=center ()=burning area
+				 * Engraving: |--********--| *=on, -=off
+				 *
 				 * A margin is supported on each side to let the X axis accelerate
 				 * and decelerate. This avoids the uneven etching on borders that
 				 * particularly affects printed text: overburns under M3, and
@@ -2459,9 +2469,9 @@ int main(int argc, char **argv)
 
 	img.diam = imgd;
 
-	if (machine.beam_w >= pixw)
+	if (machine.beam_w > pixw)
 		machine.beam_w = 0.9 * pixw;
-	else if (machine.beam_w <= -pixw)
+	else if (machine.beam_w < -pixw)
 		machine.beam_w = -0.9 * pixw;
 
 	if (fmt == OUT_FMT_GCODE && (!img.mmh || !img.mmw) && (center_mode != OUT_CNT_CIRC || !img.diam))
