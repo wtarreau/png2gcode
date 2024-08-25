@@ -82,6 +82,7 @@ enum opt {
 	OPT_TEXT_BG_VALUE,
 	OPT_TEXT_ZOOM,
 	OPT_TEXT,
+	OPT_UBW,
 };
 
 const struct option long_options[] = {
@@ -140,6 +141,7 @@ const struct option long_options[] = {
 	{"text-bg-value", required_argument, 0, OPT_TEXT_BG_VALUE },
 	{"text-zoom",   required_argument, 0, OPT_TEXT_ZOOM    },
 	{"text",        required_argument, 0, OPT_TEXT         },
+	{"raster-ubw",  no_argument,       0, OPT_UBW          },
 	{0,             0,                 0, 0                }
 };
 
@@ -243,6 +245,11 @@ struct move_queue {
 	int spindle;
 	int queued; // 0=nothing queued
 };
+
+
+/* raster preferences */
+int raster_ubw = 0;
+
 
 /* display the message and exit with the code */
 __attribute__((noreturn)) void die(int code, const char *format, ...)
@@ -366,6 +373,8 @@ void usage(int code, const char *cmd)
 	    "     --rl-shift <millimeters>  offset to apply to R->L path in raster mode (def:0)\n"
 	    "     --rl-delay <millisec>     time offset to apply to R->L path in raster mode (def:0)\n"
 	    "     --laser-on <cmd>          command to turn laser ON (def:M4)\n"
+	    "Preferences for raster mode:\n"
+	    "     --raster-ubw              apply the beam width correction uniformly (bigger output)\n"
 	    "Notes:\n"
 	    "  - for images, use -H for wood or -t on aluminum\n"
 	    "  - an empty image may be created from just text\n"
@@ -1932,6 +1941,12 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 										 0);
 						}
 
+						if (br > 0.0 && raster_ubw)
+							gcode_queue_move(file, &move_queue, G_MODE_G1,
+									 f4(img->orgx + xr + br + beam_ofs),
+									 f4(img->orgy + yr),
+									 0);
+
 						gcode_queue_move(file, &move_queue, G_MODE_G1,
 								 f4(img->orgx + xr + pxw - br + beam_ofs),
 								 f4(img->orgy+yr),
@@ -2000,6 +2015,12 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 										 f4(img->orgy + yr),
 										 0);
 						}
+
+						if (br > 0.0 && raster_ubw)
+							gcode_queue_move(file, &move_queue, G_MODE_G1,
+									 f4(img->orgx + xr - br + beam_ofs + rl_shift),
+									 f4(img->orgy + yr),
+									 0);
 
 						gcode_queue_move(file, &move_queue, G_MODE_G1,
 								 f4(img->orgx + xr - pxw + br + beam_ofs + rl_shift),
@@ -2190,6 +2211,10 @@ int main(int argc, char **argv)
 
 		case OPT_TEST:
 			test_sz = arg_i;
+			break;
+
+		case OPT_UBW:
+			raster_ubw = 1;
 			break;
 
 		case OPT_MAP: {  /* [from_min:from_max:]to_min:to_max[:gamma2] */
