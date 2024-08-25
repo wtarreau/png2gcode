@@ -224,6 +224,24 @@ struct machine {
 	     .laser_on = "M4",
 };
 
+/* G0/G1 mode used in the queue */
+enum g_mode {
+	G_MODE_INIT = 0,
+	G_MODE_G0,
+	G_MODE_G1,
+};
+
+/* Contains the last programmed move of othe beam (not sent yet). The head is
+ * at <from> before the move and will go to <to> in mode <g_mode> with spindle
+ * <spindle>.
+ */
+struct move_queue {
+	struct { float x, y; } from, to;
+	int spindle;
+	int queued; // 0=nothing queued
+	enum g_mode g_mode;
+};
+
 /* display the message and exit with the code */
 __attribute__((noreturn)) void die(int code, const char *format, ...)
 {
@@ -1531,6 +1549,63 @@ struct pass *pass_new(struct pass *last)
 	return new;
 }
 
+/* Tries to merge contiguous moves at the same spindle value, or emits a
+ * possibly pending one. For G1 moves, the spindle value is also inspected.
+ * The expected G mode (G_MODE_G0/G1) must be passed in g_mode. G_MODE_INIT
+ * flushes any pending move. Spindle is ignored (assumed 0) for INIT and G1.
+ * Returns 0.
+ */
+int gcode_queue_move(FILE *file, struct move_queue *queue, enum g_mode g_mode, float x, float y, int spindle)
+{
+	//printf("%d X%.7g Y%.7g S%d\n", ((int)g_mode) - 1, x, y, spindle);
+
+	/* first, if there's something queued at a different G mode or spindle, we
+	 * must send it now. Note that we can't have anything queued at G_MODE_INIT.
+	 */
+	if (g_mode < G_MODE_G1)
+		spindle = 0;
+
+	/* Let's merge G0 moves regardless of the direction of changes. However
+	 * for G1, we only merge contiguous moves, i.e. Y changes when there's
+	 * already an X move programmed, or X changes when there's already an Y
+	 * move programmed.
+	 */
+	if (queue->queued &&
+	    (spindle != queue->spindle ||
+	     g_mode != queue->g_mode ||
+	     (queue->g_mode != G_MODE_G0 &&
+	      ((queue->from.x != queue->to.x && y != queue->to.y) ||
+	       (queue->from.y != queue->to.y && x != queue->to.x))))) {
+
+		fprintf(file, "%s ", queue->g_mode == G_MODE_G0 ? "G0" : "G1");
+
+		if (queue->to.y == queue->from.y)
+			fprintf(file, "X%.7g", queue->to.x);
+		else if (queue->to.x == queue->from.x)
+			fprintf(file, "Y%.7g", queue->to.y);
+		else
+			fprintf(file, "X%.7g Y%.7g", queue->to.x, queue->to.y);
+
+		if (queue->g_mode == G_MODE_G1)
+			fprintf(file, " S%d", queue->spindle);
+
+		fprintf(file, "\n");
+		queue->queued = 0;
+		queue->from = queue->to;
+	}
+
+	/* same mode and spindle, let's merge */
+	queue->g_mode = g_mode;
+	queue->spindle = spindle;
+	if (g_mode != G_MODE_INIT) {
+		queue->to.x = x;
+		queue->to.y = y;
+		queue->queued++;
+	}
+
+	return 0;
+}
+
 /* emits G-CODE on file <out> (stdout if NULL), for image <img> according to
  * passes descriptions <passes>. Returns non-zero on success, zero on failure.
  * If argc is non-null, a comment line will be emitted recalling the whole
@@ -1544,6 +1619,7 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 	int pass_cnt = 0;
 	float pxw = img->mmw / img->w;
 	float br = fabs(machine.beam_w / 2.0); // beam radius
+	struct move_queue move_queue = { 0 };
 
 	if (out) {
 		file = fopen(out, "w");
@@ -1759,7 +1835,6 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 				fprintf(file, "M5 S0\nG0 X0 Y0\n");
 			}
 			else if (pass->mode == PASS_MODE_RASTER || pass->mode == PASS_MODE_RASTER_LR) {
-				uint32_t curr_spindle;
 				unsigned int x, y, x0;
 				float xr, yr;   // real positions in millimeters
 				float xl; // last non-empty X, in millimeters
@@ -1821,7 +1896,6 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 					else
 						beam_ofs = 0.0;
 
-					curr_spindle = 0;
 					x0 = 0;
 					xl = -1;
 					for (x = 0; x < img->w; x++) {
@@ -1831,56 +1905,58 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 						if (spindle)
 							xl = xr;
 
-						if (br > 0.0 && curr_spindle > spindle) {
-							/* finish previous pixel to avoid a burn */
-							fprintf(file, "X%.7g S%d\n", f4(img->orgx+xr-br+beam_ofs), curr_spindle);
-							curr_spindle = spindle;
-							if (!spindle)
-								x0 = x;
-						}
-
-						if (spindle == curr_spindle)
-							continue;
 						xr = roundf(xr * 1000.0) / 1000.0;
-						if (!curr_spindle && (!x0 || ymoved || (x - x0) * pxw >= 2.0 + 2.0 * machine.x_accel)) {
+						if (x == 0 && (!x0 || ymoved || (x - x0) * pxw >= 2.0 + 2.0 * machine.x_accel)) {
 							/* get away at normal speed */
 							if (x0 && machine.x_accel)
-								fprintf(file, "X%.7g S0\n",
-									f4(img->orgx + roundf(x0 * pxw * 1000.0) / 1000.0 + machine.x_accel + br+beam_ofs));
+								gcode_queue_move(file, &move_queue, G_MODE_G1,
+										 f4(img->orgx + roundf(x0 * pxw * 1000.0) / 1000.0 + machine.x_accel + br+beam_ofs),
+										 f4(img->orgy + yr),
+										 0);
 
-							fprintf(file, "G0 X%.7g", f4(img->orgx+xr+br+beam_ofs-machine.x_accel)); // no lf here, at least one X will follow
-							if (ymoved) {
+							/* flush pending non-null moves and travel */
+							gcode_queue_move(file, &move_queue, G_MODE_G0,
+									 f4(img->orgx + xr + br + beam_ofs - machine.x_accel),
+									 f4(img->orgy + yr), 0);
+							if (ymoved)
 								ymoved = 0;
-								fprintf(file, " Y%.7g", f4(img->orgy+yr)); // no lf here, at least one X will follow
-							}
-							fprintf(file, "\nG1 "); // no lf here, at least one X will follow
+
 							/* finish approach at normal speed */
 							if (machine.x_accel)
-								fprintf(file, "X%.7g S0\n", f4(img->orgx+xr+br+beam_ofs));
+								gcode_queue_move(file, &move_queue, G_MODE_G1,
+										 f4(img->orgx + xr + br + beam_ofs),
+										 f4(img->orgy + yr),
+										 0);
 						}
-						else
-							fprintf(file, "X%.7g S%d\n", f4(img->orgx+xr+br+beam_ofs), curr_spindle);
 
-						curr_spindle = spindle;
+						gcode_queue_move(file, &move_queue, G_MODE_G1,
+								 f4(img->orgx + xr + pxw - br + beam_ofs),
+								 f4(img->orgy+yr),
+								 spindle);
+
 						if (!spindle)
 							x0 = x;
 					}
+
 					/* trace last pixels */
-					if (curr_spindle)
-						fprintf(file, "X%.7g S%d\n",
-							f4(img->orgx - br + beam_ofs + roundf(x * pxw * 1000.0) / 1000.0),
-							curr_spindle);
+					gcode_queue_move(file, &move_queue, G_MODE_INIT, 0, 0, 0);
 
 					/* get away at normal speed */
 					if (machine.x_accel && xl >= 0)
-						fprintf(file, "X%.7g S0\n",
-							f4(img->orgx - br + beam_ofs + machine.x_accel + roundf(xl * 1000.0) / 1000.0));
+						gcode_queue_move(file, &move_queue, G_MODE_G1,
+								 f4(img->orgx - br + beam_ofs + machine.x_accel + roundf(xl * 1000.0) / 1000.0),
+								 f4(img->orgy + yr),
+								 0);
 
 					/* go back to left position if LR mode */
 					if (pass->mode == PASS_MODE_RASTER_LR)
 						continue;
 
 					/* second pass, right to left */
+
+					/* flush pending moves */
+					gcode_queue_move(file, &move_queue, G_MODE_INIT, 0, 0, 0);
+
 					y++;
 					if (y >= img->h)
 						break;
@@ -1893,7 +1969,6 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 					else
 						beam_ofs = 0.0;
 
-					curr_spindle = 0;
 					x0 = 0;
 					xl = -1;
 					for (x = img->w; x > 0; x--) {
@@ -1903,50 +1978,54 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 						if (spindle)
 							xl = xr;
 
-						if (br > 0.0 && curr_spindle > spindle) {
-							/* finish previous pixel to avoid a burn */
-							fprintf(file, "X%.7g S%d\n", f4(img->orgx + xr + rl_shift + br + beam_ofs), curr_spindle);
-							curr_spindle = spindle;
-							if (!spindle)
-								x0 = x;
-						}
-
-						if (spindle == curr_spindle)
-							continue;
 						xr = roundf(xr * 1000.0) / 1000.0;
-						if (!curr_spindle && (!x0 || ymoved || (x0 - x) * pxw >= 2.0 + 2.0 * machine.x_accel)) {
+						if (x == img->w && (!x0 || ymoved || (x0 - x) * pxw >= 2.0 + 2.0 * machine.x_accel)) {
 							/* get away at normal speed */
 							if (x0 && machine.x_accel)
-								fprintf(file, "X%.7g S0\n",
-									f4(img->orgx + roundf(x0 * pxw * 1000.0) / 1000.0 - machine.x_accel + br+beam_ofs));
+								gcode_queue_move(file, &move_queue, G_MODE_G1,
+										 f4(img->orgx + roundf(x0 * pxw * 1000.0) / 1000.0 - machine.x_accel + br + beam_ofs),
+										 f4(img->orgy + yr),
+										 0);
 
-							fprintf(file, "G0 X%.7g", f4(img->orgx + xr + rl_shift - br + beam_ofs + machine.x_accel)); // no lf here, at least one X will follow
-							if (ymoved) {
+							/* flush pending non-null moves */
+							gcode_queue_move(file, &move_queue, G_MODE_G0,
+									 f4(img->orgx + xr + rl_shift - br + beam_ofs + machine.x_accel),
+									 f4(img->orgy + yr),
+									 0);
+
+							if (ymoved)
 								ymoved = 0;
-								fprintf(file, " Y%.7g", f4(img->orgy+yr)); // no lf here, at least one X will follow
-							}
-							fprintf(file, "\nG1 "); // no lf here, at least one X will follow
+
 							/* finish approach at normal speed */
 							if (machine.x_accel)
-								fprintf(file, "X%.7g S0\n", f4(img->orgx + xr + rl_shift - br + beam_ofs));
-						} else
-							fprintf(file, "X%.7g S%d\n", f4(img->orgx + xr - br + beam_ofs + rl_shift), curr_spindle);
+								gcode_queue_move(file, &move_queue, G_MODE_G1,
+										 f4(img->orgx + xr + rl_shift - br + beam_ofs),
+										 f4(img->orgy + yr),
+										 0);
+						}
 
-						curr_spindle = spindle;
+						gcode_queue_move(file, &move_queue, G_MODE_G1,
+								 f4(img->orgx + xr - pxw + br + beam_ofs + rl_shift),
+								 f4(img->orgy + yr),
+								 spindle);
+
 						if (!spindle)
 							x0 = x;
 					}
 					/* trace last pixels */
-					if (curr_spindle)
-						fprintf(file, "X%.7g S%d\n",
-							f4(img->orgx + br + beam_ofs + rl_shift + roundf(x * pxw * 1000.0) / 1000.0),
-							curr_spindle);
+					gcode_queue_move(file, &move_queue, G_MODE_INIT, 0, 0, 0);
 
 					/* get away at normal speed */
 					if (machine.x_accel && xl >= 0)
-						fprintf(file, "X%.7g S0\n",
-							f4(img->orgx - br + beam_ofs + rl_shift - machine.x_accel + roundf(xl * 1000.0) / 1000.0));
+						gcode_queue_move(file, &move_queue, G_MODE_G1,
+								 f4(img->orgx - br + beam_ofs + rl_shift - machine.x_accel + roundf(xl * 1000.0) / 1000.0),
+								 f4(img->orgy + yr),
+								 0);
 				}
+
+				/* flush pending moves */
+				gcode_queue_move(file, &move_queue, G_MODE_INIT, 0, 0, 0);
+
 				// make sure not to draw lines between passes
 				fprintf(file, "M5 S0\nG0\n");
 			}
