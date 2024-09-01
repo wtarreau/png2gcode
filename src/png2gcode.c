@@ -109,6 +109,7 @@ const struct option long_options[] = {
 	{"spindle",     required_argument, 0, 'S'              },
 	{"beam-width",  required_argument, 0, 'w'              },
 	{"x-accel",     required_argument, 0, 'A'              },
+	{"zero",        no_argument,       0, 'z'              },
 	{"soften",      required_argument, 0, OPT_SOFTEN       },
 	{"auto-crop",   required_argument, 0, OPT_AUTO_CROP    },
 	{"crop-bottom", required_argument, 0, OPT_CROP_BOTTOM  },
@@ -159,6 +160,7 @@ enum xfrm_op {
 	XFRM_MAP,       // args: [from_min:from_max:]to_min:to_max[:gamma2]
 	XFRM_MAX_LENGTH,// args: 0=maxlen
 	XFRM_OFST,      // args: 0=value
+	XFRM_ZERO,      // args: none
 	XFRM_TEXT,      // args: 0=xalign(-1,0,1) 1=yalign, 2=#lines, 3=zoom, 4=fgalpha, 5=fgcol, 6=bgalpha, 7=bgcol
 };
 
@@ -312,6 +314,7 @@ void usage(int code, const char *cmd)
 	    "Transformations are series of operations applied to the work area:\n"
 	    "  -a --add <value>             add <value> [-1..1] to the intensity\n"
 	    "  -O --offset <value>          add <value> [-1..1] to a non-zero intensity\n"
+	    "  -z --zero                    turn lowest value to zero\n"
 	    "  -g --gamma <value>           apply abs value from bottom if >0 or from top if <0 (def 1.0)\n"
 	    "  -G --gamma2 <value>          apply a centered gamma correction (def 1.0)\n"
 	    "  -H --hash                    hash the image by setting 50%% of the dots to intensity 0\n"
@@ -1148,6 +1151,7 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 	uint32_t *freq = NULL;
 	float *soften = NULL;
 	uint32_t q;
+	float bottom = 0.0;
 
 	while (xfrm) {
 		float norm_min = 1.0;
@@ -1259,6 +1263,19 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 			//	printf("%u: %u (%f)\n", q, freq[q], (double)freq[q]/freq[1023]);
 			//}
 		}
+		else if (xfrm->op == XFRM_ZERO) {
+			/* find the lowest value */
+			bottom = 1.0;
+
+			for (y = 0; y < img->h; y++) {
+				for (x = 0; x < img->w; x++) {
+					uint32_t p = y * img->w + x;
+					float    v = img->work[p];
+					if (v < bottom)
+						bottom = v;
+				}
+			}
+		}
 		else if (xfrm->op == XFRM_TEXT) {
 			xfrm_text(img, xfrm);
 		}
@@ -1276,6 +1293,11 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 				case XFRM_OFST:
 					if (v)
 						v += xfrm->args[0];
+					break;
+
+				case XFRM_ZERO:
+					if (v == bottom)
+						v = 0.0;
 					break;
 
 				case XFRM_MUL: /* negative inverts starting from 1.0 */
@@ -1955,7 +1977,7 @@ int main(int argc, char **argv)
 
 	while (1) {
 		int option_index = 0;
-		int c = getopt_long(argc, argv, "hi:o:c:f:a:O:g:G:m:q:Q:d:HtVnrM:S:F:P:w:A:", long_options, &option_index);
+		int c = getopt_long(argc, argv, "hi:o:c:f:a:O:g:G:m:q:Q:d:zHtVnrM:S:F:P:w:A:", long_options, &option_index);
 		float arg_f = optarg ? atof(optarg) : 0.0;
 		int arg_i   = optarg ? atoi(optarg) : 0;
 
@@ -2334,6 +2356,14 @@ int main(int argc, char **argv)
 		case 'A':
 			machine.x_accel = arg_f;
 			break;
+		case 'z':
+			curr = xfrm_new(curr, XFRM_ZERO, 0, NULL);
+			if (!curr)
+				die(1, "failed to allocate a new transformation\n");
+			if (!xfrm)
+				xfrm = curr;
+			break;
+
 		case ':': /* missing argument */
 		case '?': /* unknown option */
 			die(1, "");
