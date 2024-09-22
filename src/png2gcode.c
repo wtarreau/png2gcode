@@ -236,10 +236,12 @@ enum g_mode {
  * <spindle>.
  */
 struct move_queue {
-	struct { float x, y; } from, to;
+	struct {
+		float x, y;
+		enum g_mode g_mode;
+	} from, to;
 	int spindle;
 	int queued; // 0=nothing queued
-	enum g_mode g_mode;
 };
 
 /* display the message and exit with the code */
@@ -1572,21 +1574,22 @@ int gcode_queue_move(FILE *file, struct move_queue *queue, enum g_mode g_mode, f
 	 */
 	if (queue->queued &&
 	    (spindle != queue->spindle ||
-	     g_mode != queue->g_mode ||
-	     (queue->g_mode != G_MODE_G0 &&
+	     g_mode != queue->to.g_mode ||
+	     (queue->to.g_mode != G_MODE_G0 &&
 	      ((queue->from.x != queue->to.x && y != queue->to.y) ||
 	       (queue->from.y != queue->to.y && x != queue->to.x))))) {
 
-		fprintf(file, "%s ", queue->g_mode == G_MODE_G0 ? "G0" : "G1");
+		if (queue->to.g_mode != queue->from.g_mode)
+			fprintf(file, "%s ", queue->to.g_mode == G_MODE_G0 ? "G0" : "G1");
 
-		if (queue->to.y == queue->from.y)
+		if (queue->from.g_mode >= G_MODE_G0 && queue->to.y == queue->from.y)
 			fprintf(file, "X%.7g", queue->to.x);
-		else if (queue->to.x == queue->from.x)
+		else if (queue->from.g_mode >= G_MODE_G0 && queue->to.x == queue->from.x)
 			fprintf(file, "Y%.7g", queue->to.y);
 		else
 			fprintf(file, "X%.7g Y%.7g", queue->to.x, queue->to.y);
 
-		if (queue->g_mode == G_MODE_G1)
+		if (queue->to.g_mode == G_MODE_G1)
 			fprintf(file, " S%d", queue->spindle);
 
 		fprintf(file, "\n");
@@ -1595,7 +1598,7 @@ int gcode_queue_move(FILE *file, struct move_queue *queue, enum g_mode g_mode, f
 	}
 
 	/* same mode and spindle, let's merge */
-	queue->g_mode = g_mode;
+	queue->to.g_mode = g_mode;
 	queue->spindle = spindle;
 	if (g_mode != G_MODE_INIT) {
 		queue->to.x = x;
