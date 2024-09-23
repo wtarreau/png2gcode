@@ -1941,9 +1941,6 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 							x0 = x;
 					}
 
-					/* trace last pixels */
-					gcode_queue_move(file, &move_queue, G_MODE_INIT, 0, 0, 0);
-
 					/* get away at normal speed */
 					if (machine.x_accel && xl >= 0)
 						gcode_queue_move(file, &move_queue, G_MODE_G1,
@@ -1956,9 +1953,6 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 						continue;
 
 					/* second pass, right to left */
-
-					/* flush pending moves */
-					gcode_queue_move(file, &move_queue, G_MODE_INIT, 0, 0, 0);
 
 					y++;
 					if (y >= img->h)
@@ -2015,8 +2009,6 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 						if (!spindle)
 							x0 = x;
 					}
-					/* trace last pixels */
-					gcode_queue_move(file, &move_queue, G_MODE_INIT, 0, 0, 0);
 
 					/* get away at normal speed */
 					if (machine.x_accel && xl >= 0)
