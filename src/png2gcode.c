@@ -888,7 +888,7 @@ void xfrm_text(struct image *img, struct xfrm *xfrm)
 		}
 
 		while (line < next) {
-			char c = *line++;
+			unsigned char c = *line++;
 
 			if (xchar > img->w - zoom * TEXT_WIDTH)
 				break;
