@@ -1851,7 +1851,6 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 				float xr, yr;   // real positions in millimeters
 				float xl; // last non-empty X, in millimeters
 				float beam_ofs;
-				int ymoved;
 				float rl_shift = machine.rl_shift + machine.rl_delay / 1000.0 * pass->feed / 60.0;
 
 				fprintf(file, "%s S%d\nG1 F%d\n",
@@ -1899,12 +1898,21 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 					/* first pass, left to right */
 					yr = y * img->mmh / img->h;
 					yr = roundf(yr * 1000.0) / 1000.0;
-					ymoved = 1;
 
 					if (br > 0.0 && machine.beam_w < 0.0 && y & 1)
 						beam_ofs = br;
 					else
 						beam_ofs = 0.0;
+
+					/* In order to travel to areas to be etched, we're using 3 phases over
+					 * empty areas (need to know the width):
+					 *  - 1) exit:
+					 *       if currently moving, move to min(new_pos,last_pos+x_accel)
+					 *  - 2) travel:
+					 *       if (new_pos - last_pos > 2*x_accel), travel to new_pos-x_accel
+					 *  - 3) approach:
+					 *       move to new_pos
+					 */
 
 					for (x = 0; x < img->w; x++)
 						if (img->work[y * img->w + x])
@@ -1912,39 +1920,55 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 					if (x >= img->w)
 						goto skip_empty_line;
 
-					x0 = 0;
-					xl = -1;
+					gcode_queue_move(file, &move_queue, G_MODE_G0,
+							 f4(img->orgx + br + beam_ofs - machine.x_accel),
+							 f4(img->orgy + yr), 0);
+
+					x0 = -1; // no 0-spindle pixel seen yet
+					xl = -machine.x_accel;
+
 					for (x = 0; x < img->w; x++) {
 						uint32_t spindle = img->work[y * img->w + x] * base_spindle;
 
 						xr = x * pxw;
-						if (spindle)
-							xl = xr;
+						if (!spindle) {
+							x0 = x;
+							continue;
+						}
 
 						xr = roundf(xr * 1000.0) / 1000.0;
-						if (x == 0 && (!x0 || ymoved || (x - x0) * pxw >= 2.0 + 2.0 * machine.x_accel)) {
-							/* get away at normal speed */
-							if (x0 && machine.x_accel)
-								gcode_queue_move(file, &move_queue, G_MODE_G1,
-										 f4(img->orgx + roundf(x0 * pxw * 1000.0) / 1000.0 + machine.x_accel + br+beam_ofs),
-										 f4(img->orgy + yr),
-										 0);
 
-							/* flush pending non-null moves and travel */
+						/* phase 1 */
+						if (x0 >= 0 && move_queue.to.g_mode > G_MODE_G0) {
+							/* first non-empty pixel since xl (might be < 0 if never) */
+							gcode_queue_move(file, &move_queue, G_MODE_G1,
+									 f4(img->orgx + fmin(xl + machine.x_accel, xr) + br + beam_ofs),
+									 f4(img->orgy + yr),
+									 0);
+						}
+
+						/* phase 2: travel over areas larger than 2mm + 2*acceleration */
+						if (move_queue.to.g_mode <= G_MODE_G0 || // was already traveling, fuse this one
+						    (xr - xl) > 2.0 + 2.0 * machine.x_accel) {
 							gcode_queue_move(file, &move_queue, G_MODE_G0,
 									 f4(img->orgx + xr + br + beam_ofs - machine.x_accel),
 									 f4(img->orgy + yr), 0);
-							if (ymoved)
-								ymoved = 0;
-
-							/* finish approach at normal speed */
-							if (machine.x_accel)
-								gcode_queue_move(file, &move_queue, G_MODE_G1,
-										 f4(img->orgx + xr + br + beam_ofs),
-										 f4(img->orgy + yr),
-										 0);
 						}
 
+						/* phase 3: approach at normal speed. This will be fused with the
+						 * phase 1 if no G0 was sent at phase 2. We always want to send it
+						 * after a hole so as to mark the restart point.
+						 */
+						if (machine.x_accel || x0 < 0)
+							gcode_queue_move(file, &move_queue, G_MODE_G1,
+									 f4(img->orgx + xr + br + beam_ofs),
+									 f4(img->orgy + yr),
+									 0);
+
+						/* we may need to inject some 0-spindle moves for sub-pixels.
+						 * it's the same position as for the approach above. In any
+						 * case these would be fused.
+						 */
 						if (br > 0.0 && raster_ubw)
 							gcode_queue_move(file, &move_queue, G_MODE_G1,
 									 f4(img->orgx + xr + br + beam_ofs),
@@ -1956,8 +1980,8 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 								 f4(img->orgy+yr),
 								 spindle);
 
-						if (!spindle)
-							x0 = x;
+						xl = xr;
+						x0 = -1; // reset info as not sending 0-pixels
 					}
 
 					/* get away at normal speed */
@@ -1978,54 +2002,66 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 						break;
 					yr = y * img->mmh / img->h;
 					yr = roundf(yr * 1000.0) / 1000.0;
-					ymoved = 1;
 
 					if (br > 0.0 && machine.beam_w < 0.0 && y & 1)
 						beam_ofs = br;
 					else
 						beam_ofs = 0.0;
 
-					x0 = 0;
 					for (x = img->w; x > 0; x--)
 						if (img->work[y * img->w + x - 1])
 							break;
 					if (!x) /* empty line */
 						continue;
 
-					xl = -1;
+					gcode_queue_move(file, &move_queue, G_MODE_G0,
+							 f4(img->orgx + img->w * pxw - br + beam_ofs + machine.x_accel + rl_shift),
+							 f4(img->orgy + yr), 0);
+
+					x0 = -1; // no 0-spindle pixel seen yet
+					xl = ((img->w - 1) * pxw) + machine.x_accel;
+
 					for (x = img->w; x > 0; x--) {
 						uint32_t spindle = img->work[y * img->w + x - 1] * base_spindle;
 
 						xr = x * pxw;
-						if (spindle)
-							xl = xr;
+						if (!spindle) {
+							x0 = x;
+							continue;
+						}
 
 						xr = roundf(xr * 1000.0) / 1000.0;
-						if (x == img->w && (!x0 || ymoved || (x0 - x) * pxw >= 2.0 + 2.0 * machine.x_accel)) {
-							/* get away at normal speed */
-							if (x0 && machine.x_accel)
-								gcode_queue_move(file, &move_queue, G_MODE_G1,
-										 f4(img->orgx + roundf(x0 * pxw * 1000.0) / 1000.0 - machine.x_accel + br + beam_ofs),
-										 f4(img->orgy + yr),
-										 0);
+						/* phase 1 */
+						if (x0 >= 0 && move_queue.to.g_mode > G_MODE_G0) {
+							/* first non-empty pixel since xl (might be < 0 if never) */
+							gcode_queue_move(file, &move_queue, G_MODE_G1,
+									 f4(img->orgx + fmax(xl - machine.x_accel, xr) - br + beam_ofs + rl_shift),
+									 f4(img->orgy + yr),
+									 0);
+						}
 
-							/* flush pending non-null moves */
+						/* phase 2: travel over areas larger than 2mm + 2*acceleration */
+						if (move_queue.to.g_mode <= G_MODE_G0 || // was already traveling, fuse this one
+						    (xl - xr) > 2.0 + 2.0 * machine.x_accel) {
 							gcode_queue_move(file, &move_queue, G_MODE_G0,
-									 f4(img->orgx + xr + rl_shift - br + beam_ofs + machine.x_accel),
+									 f4(img->orgx + xr - br + beam_ofs + machine.x_accel + rl_shift),
+									 f4(img->orgy + yr), 0);
+						}
+
+						/* phase 3: approach at normal speed. This will be fused with the
+						 * phase 1 if no G0 was sent at phase 2. We always want to send it
+						 * after a hole so as to mark the restart point.
+						 */
+						if (machine.x_accel || x0 < 0)
+							gcode_queue_move(file, &move_queue, G_MODE_G1,
+									 f4(img->orgx + xr - br + beam_ofs + rl_shift),
 									 f4(img->orgy + yr),
 									 0);
 
-							if (ymoved)
-								ymoved = 0;
-
-							/* finish approach at normal speed */
-							if (machine.x_accel)
-								gcode_queue_move(file, &move_queue, G_MODE_G1,
-										 f4(img->orgx + xr + rl_shift - br + beam_ofs),
-										 f4(img->orgy + yr),
-										 0);
-						}
-
+						/* we may need to inject some 0-spindle moves for sub-pixels.
+						 * it's the same position as for the approach above. In any
+						 * case these would be fused.
+						 */
 						if (br > 0.0 && raster_ubw)
 							gcode_queue_move(file, &move_queue, G_MODE_G1,
 									 f4(img->orgx + xr - br + beam_ofs + rl_shift),
@@ -2034,11 +2070,11 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 
 						gcode_queue_move(file, &move_queue, G_MODE_G1,
 								 f4(img->orgx + xr - pxw + br + beam_ofs + rl_shift),
-								 f4(img->orgy + yr),
+								 f4(img->orgy+yr),
 								 spindle);
 
-						if (!spindle)
-							x0 = x;
+						xl = xr;
+						x0 = -1; // reset info as not sending 0-pixels
 					}
 
 					/* get away at normal speed */
