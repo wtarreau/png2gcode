@@ -1908,6 +1908,12 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 					else
 						beam_ofs = 0.0;
 
+					for (x = 0; x < img->w; x++)
+						if (img->work[y * img->w + x])
+							break;
+					if (x >= img->w)
+						goto skip_empty_line;
+
 					x0 = 0;
 					xl = -1;
 					for (x = 0; x < img->w; x++) {
@@ -1962,7 +1968,7 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 								 f4(img->orgx - br + beam_ofs + machine.x_accel + roundf(xl * 1000.0) / 1000.0),
 								 f4(img->orgy + yr),
 								 0);
-
+				skip_empty_line:
 					/* go back to left position if LR mode */
 					if (pass->mode == PASS_MODE_RASTER_LR)
 						continue;
@@ -1982,6 +1988,12 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 						beam_ofs = 0.0;
 
 					x0 = 0;
+					for (x = img->w; x > 0; x--)
+						if (img->work[y * img->w + x - 1])
+							break;
+					if (!x) /* empty line */
+						continue;
+
 					xl = -1;
 					for (x = img->w; x > 0; x--) {
 						uint32_t spindle = img->work[y * img->w + x - 1] * base_spindle;
