@@ -1897,8 +1897,6 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 				 */
 				for (y = 0; y < img->h; y++) {
 					/* first pass, left to right */
-					if (y >= img->h)
-						break;
 					yr = y * img->mmh / img->h;
 					yr = roundf(yr * 1000.0) / 1000.0;
 					ymoved = 1;
