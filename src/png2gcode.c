@@ -24,8 +24,8 @@
 #define TEXT_WIDTH 6
 
 struct image {
-	uint32_t w;    // width in pixels
-	uint32_t h;    // height in pixels
+	int32_t w;     // width in pixels
+	int32_t h;     // height in pixels
 	uint8_t *rgba; // RGBA buffer
 	uint8_t *gray; // grayscale buffer
 	float *work;   // work area: 0.0 = white, 1.0+ = black
@@ -35,8 +35,8 @@ struct image {
 	float mmh;     // image height in millimeters
 	float diam;    // max computed diameter (if -cC) or zero
 	uint8_t crop_threshold; // crop above this value
-	uint32_t minx, maxx;
-	uint32_t miny, maxy;
+	int32_t minx, maxx;
+	int32_t miny, maxy;
 };
 
 enum out_fmt {
@@ -292,17 +292,17 @@ double imgyr(const struct image *img, int y)
 }
 
 /* returns the pixel intensity at <x,y> or 0 if outside of the viewing area */
-float get_pix(const struct image *img, uint32_t x, uint32_t y)
+float get_pix(const struct image *img, int32_t x, int32_t y)
 {
-	if (y >= img->h)
+	if (y < 0 || y >= img->h)
 		return 0;
-	if (x >= img->w)
+	if (x < 0 || x >= img->w)
 		return 0;
 	return img->work[y * img->w + x];
 }
 
 /* computes the square of the distance between points 1 and 2 */
-float sqdist(uint32_t x1, uint32_t y1, uint32_t x2, uint32_t y2, float resx, float resy)
+float sqdist(int32_t x1, int32_t y1, int32_t x2, int32_t y2, float resx, float resy)
 {
 	resx *= (int)(x2 - x1);
 	resy *= (int)(y2 - y1);
@@ -424,9 +424,9 @@ int read_rgba_file(const char *file, struct image *img)
  * Returns non-zero on sucess, or 0 on failure, in which case the contents of
  * <img> remains undefined.
  */
-int generate_test_pattern(struct image *img, uint32_t w, uint32_t h)
+int generate_test_pattern(struct image *img, int32_t w, int32_t h)
 {
-	uint32_t x, y, v;
+	int32_t x, y, v;
 
 	memset(img, 0, sizeof(*img));
 
@@ -493,8 +493,8 @@ int write_gray_file(const char *file, struct image *img)
  */
 int rgba_to_gray(struct image *img)
 {
-	uint32_t x, y;
-	uint32_t minx, maxx, miny, maxy;
+	int32_t x, y;
+	int32_t minx, maxx, miny, maxy;
 
 	if (!img->rgba)
 		return 0;
@@ -508,7 +508,7 @@ int rgba_to_gray(struct image *img)
 
 	for (y = 0; y < img->h; y++) {
 		for (x = 0; x < img->w; x++) {
-			uint32_t v, p;
+			int32_t v, p;
 			uint8_t r, g, b, a;
 
 			p = (y * img->w + x) * 4;
@@ -559,7 +559,7 @@ int rgba_to_gray(struct image *img)
  */
 int gray_to_work(struct image *img)
 {
-	uint32_t x, y;
+	int32_t x, y;
 
 	if (!img->gray)
 		return 0;
@@ -591,7 +591,7 @@ int gray_to_work(struct image *img)
  */
 int work_to_gray(struct image *img, int raw)
 {
-	uint32_t x, y;
+	int32_t x, y;
 
 	if (!img->work)
 		return 0;
@@ -643,16 +643,16 @@ int work_to_gray(struct image *img, int raw)
  * x0<=x1, y0<=y1. The image's w and h are updated. The buffer is rearranged
  * and the extra area is released. Note that the img->area pointer may change.
  */
-int crop_gray_image(struct image *img, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1)
+int crop_gray_image(struct image *img, int32_t x0, int32_t y0, int32_t x1, int32_t y1)
 {
 	int row_pre, row_post;
 	uint8_t *src, *dst;
-	uint32_t x, y;
+	int32_t x, y;
 
-	if (x0 >= img->w || x1 >= img->w || x0 > x1)
+	if (x0 < 0 || x0 >= img->w || x1 < 0 || x1 >= img->w || x0 > x1)
 		return 0;
 
-	if (y0 >= img->h || y1 >= img->h || y0 > y1)
+	if (y0 < 0 || y0 >= img->h || y1 < 0 || y1 >= img->h || y0 > y1)
 		return 0;
 
 	if (!img->gray)
@@ -1176,7 +1176,7 @@ void measure_text_size(struct xfrm *xfrm, int *width, int *height)
  */
 int xfrm_apply(struct image *img, struct xfrm *xfrm)
 {
-	uint32_t x, y;
+	int32_t x, y;
 	uint32_t *freq = NULL;
 	float *soften = NULL;
 	uint32_t q;
@@ -1847,7 +1847,7 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 				fprintf(file, "M5 S0\nG0 X0 Y0\n");
 			}
 			else if (pass->mode == PASS_MODE_RASTER || pass->mode == PASS_MODE_RASTER_LR) {
-				unsigned int x, y, x0;
+				int x, y, x0;
 				float xr, yr;   // real positions in millimeters
 				float xl; // last non-empty X, in millimeters
 				float beam_ofs;
