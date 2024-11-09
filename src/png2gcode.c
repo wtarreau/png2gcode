@@ -1157,7 +1157,7 @@ void measure_text_size(struct xfrm *xfrm, int *width, int *height)
 				line = next;
 			}
 
-			w = wmax * xfrm->args[3] * TEXT_HEIGHT; // cols * zoom
+			w = wmax * xfrm->args[3] * TEXT_WIDTH; // cols * zoom
 			if (xfrm->args[0] < 0 && l_w < w)       // xalign == left
 				l_w = w;
 			else if (xfrm->args[0] == 0 && c_w < w) // xalign == center
