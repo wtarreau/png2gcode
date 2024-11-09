@@ -20,10 +20,10 @@
 /* max number of arguments for a transformation */
 #define MAX_XFRM_ARGS 10
 
-/* 5x7 fonts give 6x8 as we keep one pixel around on X and 1 on Y */
+/* 5x7 fonts give 6x9 as we keep one pixel around on X and 2 on Y */
 #define TEXT_HEIGHT 7
 #define TEXT_WIDTH 5
-#define TEXT_Y_MARGIN 1
+#define TEXT_Y_MARGIN 2
 #define TEXT_X_MARGIN 1
 
 struct image {
