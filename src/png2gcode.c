@@ -20,9 +20,11 @@
 /* max number of arguments for a transformation */
 #define MAX_XFRM_ARGS 10
 
-/* 5x7 fonts give 6x8 as we keep one pixel around */
-#define TEXT_HEIGHT 8
-#define TEXT_WIDTH 6
+/* 5x7 fonts give 6x8 as we keep one pixel around on X and 1 on Y */
+#define TEXT_HEIGHT 7
+#define TEXT_WIDTH 5
+#define TEXT_Y_MARGIN 1
+#define TEXT_X_MARGIN 1
 
 struct image {
 	int32_t w;     // width in pixels
@@ -853,11 +855,11 @@ void xfrm_text(struct image *img, struct xfrm *xfrm)
 	bg_value = xfrm->args[7];
 
 	if (yalign < 0) // bottom
-		yinit = lines * zoom * TEXT_HEIGHT - 1;
+		yinit = lines * zoom * (TEXT_HEIGHT + TEXT_Y_MARGIN) - 1;
 	else if (yalign == 0) // center
-		yinit = img->h / 2 + lines * zoom * TEXT_HEIGHT / 2 - 1;
+		yinit = img->h / 2 + lines * zoom * (TEXT_HEIGHT + TEXT_Y_MARGIN) / 2 - (TEXT_Y_MARGIN & 1);
 	else // top
-		yinit = img->h - 1;
+		yinit = img->h - TEXT_Y_MARGIN;
 
 	if (xalign < 0) // left
 		xinit = 0;
@@ -871,7 +873,7 @@ void xfrm_text(struct image *img, struct xfrm *xfrm)
 		next = strchr(line, '\n');
 		if (!next)
 			next = line + strlen(line);
-		if (yinit < zoom * TEXT_HEIGHT - 1 || yinit >= img->h)
+		if (yinit < zoom * (TEXT_HEIGHT + TEXT_Y_MARGIN) - 1 || yinit >= img->h)
 			goto skip;
 
 		/* we're going to print between line and next-1 */
@@ -879,33 +881,33 @@ void xfrm_text(struct image *img, struct xfrm *xfrm)
 		if (xalign < 0)
 			xchar = 0;
 		else if (xalign == 0)
-			xchar = xinit - width * zoom * TEXT_WIDTH / 2;
+			xchar = xinit - width * zoom * (TEXT_WIDTH + TEXT_X_MARGIN) / 2;
 		else
-			xchar = xinit - width * zoom * TEXT_WIDTH;
+			xchar = xinit - width * zoom * (TEXT_WIDTH + TEXT_X_MARGIN);
 
 		while (xchar < 0) {
-			xchar += zoom * TEXT_WIDTH;
+			xchar += zoom * (TEXT_WIDTH + TEXT_X_MARGIN);
 			line++;
 		}
 
 		while (line < next) {
 			unsigned char c = *line++;
 
-			if (xchar > img->w - zoom * TEXT_WIDTH)
+			if (xchar > img->w - zoom * (TEXT_WIDTH + TEXT_X_MARGIN))
 				break;
 
 			if (c < 0x20 || c > 0x7f)
 				c = 0x20;
 			c -= 0x20;
 
-			for (y = 0; y < zoom * TEXT_HEIGHT; y++) {
-				if (y >= zoom * (TEXT_HEIGHT - 1) && !linenum)
+			for (y = 0; y < zoom * (TEXT_HEIGHT + TEXT_Y_MARGIN); y++) {
+				if (y >= zoom * TEXT_HEIGHT && !linenum)
 					break;
-				for (x = 0; x < zoom * TEXT_WIDTH; x++) {
-					if (x >= zoom * (TEXT_WIDTH - 1) && line >= next)
+				for (x = 0; x < zoom * (TEXT_WIDTH + TEXT_X_MARGIN); x++) {
+					if (x >= zoom * TEXT_WIDTH && line >= next)
 						break;
-					if (x < zoom * (TEXT_WIDTH - 1) && y < zoom * (TEXT_HEIGHT - 1) &&
-					    font5x7[(uint8_t)c][y / zoom] & (1 << ((TEXT_WIDTH - 2) - (x / zoom))))
+					if (x < zoom * TEXT_WIDTH && y < zoom * TEXT_HEIGHT &&
+					    font5x7[(uint8_t)c][y / zoom] & (1 << ((TEXT_WIDTH - 1) - (x / zoom))))
 						img->work[(yinit - y) * img->w + xchar + x] =
 							img->work[(yinit - y) * img->w + xchar + x] * (1.0 - fg_alpha) + fg_alpha * fg_value;
 					else
@@ -913,10 +915,10 @@ void xfrm_text(struct image *img, struct xfrm *xfrm)
 							img->work[(yinit - y) * img->w + xchar + x] * (1.0 - bg_alpha) + bg_alpha * bg_value;
 				}
 			}
-			xchar += zoom * TEXT_WIDTH;
+			xchar += zoom * (TEXT_WIDTH + TEXT_X_MARGIN);
 		}
 	skip:
-		yinit -= zoom * TEXT_HEIGHT;
+		yinit -= zoom * (TEXT_HEIGHT + TEXT_Y_MARGIN);
 		if (*next)
 			next++;
 		line = next;
@@ -1136,7 +1138,7 @@ void measure_text_size(struct xfrm *xfrm, int *width, int *height)
 	l_w = c_w = r_w = t_h = c_h = b_h = 0;
 	while (xfrm) {
 		if (xfrm->op == XFRM_TEXT) {
-			h = xfrm->args[2] * xfrm->args[3] * TEXT_HEIGHT; // lines * zoom
+			h = xfrm->args[2] * xfrm->args[3] * (TEXT_HEIGHT + TEXT_Y_MARGIN); // lines * zoom
 			if (xfrm->args[1] < 0 && b_h < h)       // yalign == bottom
 				b_h = h;
 			else if (xfrm->args[1] == 0 && c_h < h) // yalign == center
@@ -1157,7 +1159,7 @@ void measure_text_size(struct xfrm *xfrm, int *width, int *height)
 				line = next;
 			}
 
-			w = wmax * xfrm->args[3] * TEXT_WIDTH; // cols * zoom
+			w = wmax * xfrm->args[3] * (TEXT_WIDTH + TEXT_X_MARGIN); // cols * zoom
 			if (xfrm->args[0] < 0 && l_w < w)       // xalign == left
 				l_w = w;
 			else if (xfrm->args[0] == 0 && c_w < w) // xalign == center
