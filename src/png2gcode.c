@@ -1579,6 +1579,13 @@ int gcode_queue_move(FILE *file, struct move_queue *queue, enum g_mode g_mode, f
 	if (g_mode < G_MODE_G1)
 		spindle = 0;
 
+	/* If only the spindle changes and no move is made, there's no
+	 * engraving, it's just an artefact that must be eliminated.
+	 */
+	if (queue->queued && g_mode == queue->to.g_mode &&
+	    x == queue->to.x && y == queue->to.y)
+		return 0;
+
 	/* Let's merge G0 moves regardless of the direction of changes. However
 	 * for G1, we only merge contiguous moves, i.e. Y changes when there's
 	 * already an X move programmed, or X changes when there's already an Y
