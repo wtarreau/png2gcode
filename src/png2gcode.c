@@ -857,7 +857,7 @@ void xfrm_text(struct image *img, struct xfrm *xfrm)
 	if (yalign < 0) // bottom
 		yinit = lines * zoom * (TEXT_HEIGHT + TEXT_Y_MARGIN) - 1;
 	else if (yalign == 0) // center
-		yinit = img->h / 2 + lines * zoom * (TEXT_HEIGHT + TEXT_Y_MARGIN) / 2 - (TEXT_Y_MARGIN & 1);
+		yinit = (img->h + lines * zoom * (TEXT_HEIGHT + TEXT_Y_MARGIN) + 1) / 2 - 1;
 	else // top
 		yinit = img->h - TEXT_Y_MARGIN;
 
