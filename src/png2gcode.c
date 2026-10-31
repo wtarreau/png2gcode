@@ -486,7 +486,11 @@ void usage(int code, const char *cmd)
 	    "  - for images, use -H for wood or -t on aluminum\n"
 	    "  - an empty image may be created from just text\n"
 	    "  - for pure text, -d0 is recommended to sharpen the text\n"
-	    "\n", cmd);
+	    "  - each pass is set by -M/-F/-S in any order, and terminated by -P\n"
+	    "Example: engrave once, then cut 3 times around the artwork with a hanging hole:\n"
+	    "  %s -i in.png --image-width 80 -M raster -S 255 -F 1200 -P 1 \\\n"
+	    "      -M cut -P 3 --cut-hole 3 -o out.gcode\n"
+	    "\n", cmd, cmd);
 }
 
 /* reads file <file> into rgba image <img>, which will be initialized. The image
