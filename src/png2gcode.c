@@ -2314,30 +2314,31 @@ int cut_loop_set_start(struct cut_loop *loop)
 	return 1;
 }
 
-/* returns non-zero if cell (<x>,<y>) of grid <grid> has CUT_KEEP. Cells outside
- * of the grid don't have it.
+/* returns non-zero if cell (<x>,<y>) of grid <grid> has flag <flag>. Cells
+ * outside of the grid don't have it.
  */
-int cut_keep(const struct cut_grid *grid, int32_t x, int32_t y)
+int cut_has(const struct cut_grid *grid, int32_t x, int32_t y, uint8_t flag)
 {
 	if (x < 0 || x >= grid->w || y < 0 || y >= grid->h)
 		return 0;
-	return !!(grid->map[y * grid->w + x] & CUT_KEEP);
+	return !!(grid->map[y * grid->w + x] & flag);
 }
 
-/* Traces the boundaries of the CUT_KEEP area of grid <grid> using marching
- * squares and prepends them as closed loops to list <loops>. The squares have
- * the centers of 4 adjacent cells as corners, numbered counter-clockwise from
- * the bottom left one, and edge k joins corners k and k+1. Each boundary point
- * is the middle of an edge joining a kept corner and a non-kept one. A loop is
- * followed square by square, always entering a square through an edge going
- * from a kept corner to a non-kept one, and leaving it through the next edge
- * going from a non-kept corner to a kept one. This keeps the piece on the
- * left, so that the outer boundaries are counter-clockwise, and it joins kept
- * cells that only touch by a corner, which means that the area outside of the
- * piece is considered 4-connected. The grid's border cells must not have
- * CUT_KEEP. Returns non-zero on success, 0 on failure.
+/* Traces the boundaries of the area of grid <grid> made of the cells having
+ * flag <flag>, using marching squares, and prepends them as closed loops to
+ * list <loops>. The squares have the centers of 4 adjacent cells as corners,
+ * numbered counter-clockwise from the bottom left one, and edge k joins
+ * corners k and k+1. Each boundary point is the middle of an edge joining a
+ * corner inside the area and one outside. A loop is followed square by
+ * square, always entering a square through an edge going from an inside
+ * corner to an outside one, and leaving it through the next edge going from
+ * an outside corner to an inside one. This keeps the area on the left, so
+ * that its outer boundaries are counter-clockwise, and it joins inside cells
+ * that only touch by a corner, which means that the outside of the area is
+ * considered 4-connected. The grid's border cells must not have <flag>.
+ * Returns non-zero on success, 0 on failure.
  */
-int cut_trace(struct cut_grid *grid, struct cut_loop **loops)
+int cut_trace(struct cut_grid *grid, uint8_t flag, struct cut_loop **loops)
 {
 	static const int32_t cdx[4] = { 0, 1, 1, 0 };  // corners of a square
 	static const int32_t cdy[4] = { 0, 0, 1, 1 };
@@ -2347,14 +2348,17 @@ int cut_trace(struct cut_grid *grid, struct cut_loop **loops)
 	int32_t x, y, sx, sy, k;
 	int32_t x0, y0, k0;
 	int32_t ax, ay, bx, by;
-	int32_t d, m;
+	int32_t d, m, p;
 	int c[4];
+
+	for (p = 0; p < grid->w * grid->h; p++)
+		grid->map[p] &= ~CUT_SEEN;
 
 	for (y = 0; y < grid->h; y++) {
 		for (x = 0; x < grid->w - 1; x++) {
 			if (grid->map[y * grid->w + x] & CUT_SEEN)
 				continue;
-			if (cut_keep(grid, x, y) == cut_keep(grid, x + 1, y))
+			if (cut_has(grid, x, y, flag) == cut_has(grid, x + 1, y, flag))
 				continue;
 
 			loop = calloc(1, sizeof(*loop));
@@ -2364,7 +2368,7 @@ int cut_trace(struct cut_grid *grid, struct cut_loop **loops)
 			*loops = loop;
 
 			/* square entered through the edge between these two cells */
-			if (cut_keep(grid, x, y)) {
+			if (cut_has(grid, x, y, flag)) {
 				sx = x;
 				sy = y;
 				k = 0;
@@ -2391,7 +2395,7 @@ int cut_trace(struct cut_grid *grid, struct cut_loop **loops)
 					return 0;
 
 				for (m = 0; m < 4; m++)
-					c[m] = cut_keep(grid, sx + cdx[m], sy + cdy[m]);
+					c[m] = cut_has(grid, sx + cdx[m], sy + cdy[m], flag);
 
 				for (d = 1; d < 4; d++) {
 					m = (k + d) % 4;
@@ -2933,7 +2937,7 @@ int cut_compute(const struct image *img, struct cut_loop **loops)
 			goto out;
 	}
 
-	if (!cut_trace(&grid, loops))
+	if (!cut_trace(&grid, CUT_KEEP, loops))
 		goto out;
 
 	for (loop = *loops; loop; loop = loop->next) {
