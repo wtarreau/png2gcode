@@ -110,6 +110,8 @@ enum opt {
 	OPT_CUT_THRESHOLD,
 	OPT_CUT_RES,
 	OPT_CUT_TOL,
+	OPT_CUT_HOLE,
+	OPT_CUT_TAB,
 };
 
 const struct option long_options[] = {
@@ -175,6 +177,8 @@ const struct option long_options[] = {
 	{"cut-threshold", required_argument, 0, OPT_CUT_THRESHOLD },
 	{"cut-res",     required_argument, 0, OPT_CUT_RES      },
 	{"cut-tol",     required_argument, 0, OPT_CUT_TOL      },
+	{"cut-hole",    required_argument, 0, OPT_CUT_HOLE     },
+	{"cut-tab",     required_argument, 0, OPT_CUT_TAB      },
 	{0,             0,                 0, 0                }
 };
 
@@ -293,6 +297,8 @@ struct cutting {
 	float threshold; // pixels above this work value are artwork
 	float res;       // cut grid cell size in mm, <=0 = auto
 	float tol;       // path simplification tolerance in mm, <0 = auto
+	float hole;      // diameter of the hanging hole in mm, 0 = none
+	float tab;       // diameter of the tab around the hanging hole in mm, <0 = auto
 } cutting = {
 	.margin    = 2.0,
 	.smooth    = -1,
@@ -300,6 +306,8 @@ struct cutting {
 	.threshold = 0,
 	.res       = 0,
 	.tol       = -1,
+	.hole      = 0,
+	.tab       = -1,
 };
 
 /* Grid used to compute the cut line. Cells are squares of <res> millimeters.
@@ -462,6 +470,8 @@ void usage(int code, const char *cmd)
 	    "     --cut-threshold <value>   pixels above this intensity are artwork (def: 0.0)\n"
 	    "     --cut-res <mm>            cut computation resolution (def: min(pixel size,0.1))\n"
 	    "     --cut-tol <mm>            cut path simplification tolerance (def: res/2)\n"
+	    "     --cut-hole <mm>           diameter of a hanging hole on top, 0=none (def: 0)\n"
+	    "     --cut-tab <mm>            diameter of the tab around the hole (def: hole+2*margin)\n"
 	    "Material characteristics:\n"
 	    "  -d --diffuse <ratio>         adjacent radiation for hash & soften (def:0.18)\n"
 	    "Machine settings:\n"
@@ -2668,12 +2678,86 @@ int cut_shape(struct cut_grid *grid, float margin, float bridge, float smooth)
 	return cut_fill_outside(grid);
 }
 
+/* Places a hanging tab on top of the artwork of grid <grid>, and adds it as a
+ * disc of <radius> cells to the CUT_ARTWORK cells so that the margin, bridges
+ * and rounding are applied around it. A hanging piece rotates until its center
+ * of mass is right below the hole, so the tab is horizontally centered on the
+ * centroid of the CUT_KEEP area (the piece including its margin). It is placed
+ * <clear> cells above the topmost artwork cell, so that the piece always hangs
+ * the right way up. When the artwork right below is lower, the tab is attached
+ * by the bridges. The tab's center is returned in cells in <cx> and <cy>, or -1
+ * in <cx> if there is no artwork. Returns non-zero on success, 0 on failure.
+ */
+int cut_add_tab(struct cut_grid *grid, float radius, float clear, int32_t *cx, int32_t *cy)
+{
+	int32_t cells = grid->w * grid->h;
+	int32_t x, y, p, n;
+	double sumx;
+
+	*cx = -1;
+	sumx = 0;
+	n = 0;
+	for (p = 0; p < cells; p++) {
+		if (!(grid->map[p] & CUT_KEEP))
+			continue;
+		sumx += p % grid->w;
+		n++;
+	}
+
+	for (p = cells - 1; p >= 0; p--)
+		if (grid->map[p] & CUT_ARTWORK)
+			break;
+
+	if (!n || p < 0)
+		return 1;
+
+	x = nearbyint(sumx / n);
+	y = p / grid->w + ceil(clear);
+
+	for (p = 0; p < cells; p++)
+		if ((double)(p % grid->w - x) * (p % grid->w - x) + (double)(p / grid->w - y) * (p / grid->w - y) <= radius * radius)
+			grid->map[p] |= CUT_ARTWORK;
+
+	*cx = x;
+	*cy = y;
+	return 1;
+}
+
+/* Prepends to list <loops> a circle of <radius> millimeters centered on
+ * (<x>,<y>), made of a single full counter-clockwise arc starting and ending
+ * at its bottom. Returns non-zero on success, 0 on failure.
+ */
+int cut_add_circle(struct cut_loop **loops, float x, float y, float radius)
+{
+	struct cut_loop *loop;
+
+	loop = calloc(1, sizeof(*loop));
+	if (!loop)
+		return 0;
+	loop->next = *loops;
+	*loops = loop;
+
+	loop->arc = malloc(sizeof(*loop->arc));
+	loop->ctr = malloc(2 * sizeof(*loop->ctr));
+	if (!loop->arc || !loop->ctr || !cut_loop_add(loop, x, y - radius))
+		return 0;
+
+	loop->arc[0] = 3;
+	loop->ctr[0] = x;
+	loop->ctr[1] = y;
+	return 1;
+}
+
 /* Computes the cut line around the artwork of image <img> according to the
  * <cutting> settings, and returns it in <loops> as a list of closed loops with
  * image-relative coordinates in millimeters. The list is empty when there is
- * no artwork, and contains one loop per separate piece. The steps are:
+ * no artwork, and contains one loop per separate piece, preceded by the
+ * hanging hole if any, since inner cuts must be made before the piece is
+ * detached. The steps are:
  *   - mark the cells covering the artwork on a grid larger than the image;
  *   - compute the piece around it (see cut_shape());
+ *   - if a hanging hole is requested, add the tab to the artwork on top of the
+ *     piece and compute the piece again;
  *   - trace the piece's boundaries, smooth them, make them start at their
  *     bottom-left point and simplify them.
  * Returns non-zero on success, 0 on failure.
@@ -2683,12 +2767,19 @@ int cut_compute(const struct image *img, struct cut_loop **loops)
 	struct cut_grid grid;
 	struct cut_loop *loop;
 	float res, pad, smooth, bridge, tol;
-	float area;
+	float area, tab, clear;
+	int32_t cx, cy;
 	int ret = 0;
 
 	*loops = NULL;
 	smooth = cutting.smooth >= 0 ? cutting.smooth : cutting.margin;
 	bridge = cutting.bridge >= 0 ? cutting.bridge : fmax(3.0, 2 * cutting.margin);
+
+	/* the hole's center must be far enough from the artwork for both the
+	 * tab and the margin around the hole.
+	 */
+	tab = cutting.tab >= 0 ? cutting.tab : cutting.hole + 2 * cutting.margin;
+	clear = fmax(tab / 2, cutting.hole / 2 + cutting.margin);
 
 	res = cutting.res;
 	if (res <= 0) {
@@ -2699,13 +2790,25 @@ int cut_compute(const struct image *img, struct cut_loop **loops)
 	}
 	tol = cutting.tol >= 0 ? cutting.tol : res / 2;
 
-	/* the closing must not reach the grid's border */
+	/* the closing must not reach the grid's border, even above the tab */
 	pad = cutting.margin + smooth + 2 * res;
+	if (cutting.hole > 0)
+		pad += clear + tab / 2;
+
 	if (!cut_grid_init(&grid, img, res, pad, cutting.threshold))
 		goto out;
 
 	if (!cut_shape(&grid, cutting.margin / res, bridge / res, smooth / res))
 		goto out;
+
+	cx = -1;
+	if (cutting.hole > 0) {
+		if (!cut_add_tab(&grid, tab / 2 / res, clear / res, &cx, &cy))
+			goto out;
+
+		if (cx >= 0 && !cut_shape(&grid, cutting.margin / res, bridge / res, smooth / res))
+			goto out;
+	}
 
 	if (!cut_trace(&grid, loops))
 		goto out;
@@ -2718,6 +2821,13 @@ int cut_compute(const struct image *img, struct cut_loop **loops)
 		if (!cut_fit(loop, tol))
 			goto out;
 	}
+
+	if (cx >= 0 &&
+	    !cut_add_circle(loops,
+			    grid.x0 + (cx + 0.5) * res,
+			    grid.y0 + (cy + 0.5) * res,
+			    cutting.hole / 2))
+		goto out;
 	ret = 1;
  out:
 	if (!ret) {
@@ -3622,6 +3732,14 @@ int main(int argc, char **argv)
 
 		case OPT_CUT_TOL:
 			cutting.tol = arg_f;
+			break;
+
+		case OPT_CUT_HOLE:
+			cutting.hole = arg_f;
+			break;
+
+		case OPT_CUT_TAB:
+			cutting.tab = arg_f;
 			break;
 
 		case OPT_MAP: {  /* [from_min:from_max:]to_min:to_max[:gamma2] */
