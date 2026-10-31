@@ -223,6 +223,7 @@ enum xfrm_op {
 /* error diffusion algorithms used for dithering */
 enum dither_algo {
 	DITHER_FS = 0,  // Floyd-Steinberg
+	DITHER_ATKINSON,// Atkinson: only diffuses 3/4 of the error, for more contrast
 	DITHER_ALGOS    // must be last one
 };
 
@@ -242,12 +243,24 @@ const struct dither_cell dither_fs[] = {
 	{  0, 0, 0        },
 };
 
+const struct dither_cell dither_atkinson[] = {
+	{  1, 0, 1.0 / 8 },
+	{  2, 0, 1.0 / 8 },
+	{ -1, 1, 1.0 / 8 },
+	{  0, 1, 1.0 / 8 },
+	{  1, 1, 1.0 / 8 },
+	{  0, 2, 1.0 / 8 },
+	{  0, 0, 0       },
+};
+
 const struct dither_cell *dither_cells[DITHER_ALGOS] = {
-	[DITHER_FS] = dither_fs,
+	[DITHER_FS]       = dither_fs,
+	[DITHER_ATKINSON] = dither_atkinson,
 };
 
 const char *dither_names[DITHER_ALGOS] = {
-	[DITHER_FS] = "fs",
+	[DITHER_FS]       = "fs",
+	[DITHER_ATKINSON] = "atkinson",
 };
 
 struct xfrm {
@@ -508,7 +521,7 @@ void usage(int code, const char *cmd)
 	    "     --soften <value>          subtract neighbors' average times <value>\n"
 	    "     --map <args[2..5]>        map values [from_min:from_max:]to_min:to_max[:gamma2]\n"
 	    "     --max-length <pixels>     limit long series for use with FS dithering (def: 0)\n"
-	    "     --dither <algo>           dither to black and white (fs)\n"
+	    "     --dither <algo>           dither to black and white (fs,atkinson)\n"
 	    "     --text-fg-value <value>   set FG value for future text (def: 1.0)\n"
 	    "     --text-fg-alpha <value>   set FG alpha for future text (def: 1.0)\n"
 	    "     --text-bg-value <value>   set BG value for future text (def: 0.0)\n"
