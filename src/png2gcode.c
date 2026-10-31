@@ -2362,6 +2362,60 @@ int has_cut_pass(const struct pass *passes)
 	return 0;
 }
 
+/* Draws the cut line <loops> in red on image <img>, after extending its gray
+ * buffer as needed to fit the line, and turning it to rgba so that the line
+ * is distinguished from the artwork. Nothing is changed if there is no loop.
+ * Returns non-zero on success, 0 on failure.
+ */
+int draw_cut_loops(struct image *img, const struct cut_loop *loops)
+{
+	const struct cut_loop *loop;
+	float pxw = img->mmw / img->w;
+	float pxh = img->mmh / img->h;
+	float minx, maxx, miny, maxy;
+	float u0, v0, u1, v1;
+	int32_t l, r, t, b;
+	int32_t i, s, steps;
+	int32_t x, y;
+
+	if (!loops)
+		return 1;
+
+	cut_loops_extent(loops, &minx, &maxx, &miny, &maxy);
+
+	/* pixel x covers X from x*pxw to (x+1)*pxw, row y covers Y around y*pxh */
+	l = minx < 0 ? ceil(-minx / pxw) : 0;
+	r = floor(maxx / pxw) >= img->w ? floor(maxx / pxw) - img->w + 1 : 0;
+	b = miny < -0.5 * pxh ? ceil(-miny / pxh - 0.5) : 0;
+	t = maxy >= (img->h - 0.5) * pxh ? floor(maxy / pxh + 0.5) - img->h + 1 : 0;
+
+	if (!extend_gray_image(img, l, r, t, b))
+		return 0;
+
+	if (!gray_to_rgba(img))
+		return 0;
+
+	for (loop = loops; loop; loop = loop->next) {
+		for (i = 0; i < loop->npts; i++) {
+			u0 = loop->pts[2 * i] / pxw + l;
+			v0 = loop->pts[2 * i + 1] / pxh + 0.5 + b;
+			u1 = loop->pts[2 * ((i + 1) % loop->npts)] / pxw + l;
+			v1 = loop->pts[2 * ((i + 1) % loop->npts) + 1] / pxh + 0.5 + b;
+			steps = ceil(fmax(fabs(u1 - u0), fabs(v1 - v0))) + 1;
+			for (s = 0; s <= steps; s++) {
+				x = floor(u0 + (u1 - u0) * s / steps);
+				y = floor(v0 + (v1 - v0) * s / steps);
+				if (x < 0 || x >= img->w || y < 0 || y >= img->h)
+					continue;
+				img->rgba[(y * img->w + x) * 4 + 0] = 255;
+				img->rgba[(y * img->w + x) * 4 + 1] = 0;
+				img->rgba[(y * img->w + x) * 4 + 2] = 0;
+			}
+		}
+	}
+	return 1;
+}
+
 /* create a new g-code pass from previous known one */
 struct pass *pass_new(struct pass *last)
 {
@@ -3542,8 +3596,22 @@ int main(int argc, char **argv)
 		die(6, "failed to apply one transformation to the image\n");
 
 	if (fmt == OUT_FMT_PNG) {
+		struct cut_loop *cut_loops = NULL;
+
+		/* the cut line is drawn on the preview if a cut pass is set */
+		if (has_cut_pass(passes)) {
+			if (!img.mmw || !img.mmh)
+				die(1, "image width/height are mandatory to preview the cut line\n");
+			if (!cut_compute(&img, &cut_loops))
+				die(6, "failed to compute the cut line\n");
+		}
+
 		if (!work_to_gray(&img, arg_raw_preview))
 			die(3, "failed to convert image to gray\n");
+
+		if (!draw_cut_loops(&img, cut_loops))
+			die(3, "failed to draw the cut line\n");
+		cut_loops_free(cut_loops);
 
 		if (img.rgba && !write_rgba_file(out, &img))
 			die(5, "failed to write file %s\n", out);
