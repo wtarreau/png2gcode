@@ -112,6 +112,8 @@ enum opt {
 	OPT_CUT_TOL,
 	OPT_CUT_HOLE,
 	OPT_CUT_TAB,
+	OPT_CUT_HOLDS,
+	OPT_CUT_HOLD_LEN,
 };
 
 const struct option long_options[] = {
@@ -179,6 +181,8 @@ const struct option long_options[] = {
 	{"cut-tol",     required_argument, 0, OPT_CUT_TOL      },
 	{"cut-hole",    required_argument, 0, OPT_CUT_HOLE     },
 	{"cut-tab",     required_argument, 0, OPT_CUT_TAB      },
+	{"cut-holds",   required_argument, 0, OPT_CUT_HOLDS    },
+	{"cut-hold-len", required_argument, 0, OPT_CUT_HOLD_LEN },
 	{0,             0,                 0, 0                }
 };
 
@@ -299,6 +303,8 @@ struct cutting {
 	float tol;       // path simplification tolerance in mm, <0 = auto
 	float hole;      // diameter of the hanging hole in mm, 0 = none
 	float tab;       // diameter of the tab around the hanging hole in mm, <0 = auto
+	int holds;       // number of holding tabs left uncut along each piece
+	float hold_len;  // length of each holding tab in mm
 } cutting = {
 	.margin    = 2.0,
 	.smooth    = -1,
@@ -308,6 +314,8 @@ struct cutting {
 	.tol       = -1,
 	.hole      = 0,
 	.tab       = -1,
+	.holds     = 0,
+	.hold_len  = 0.5,
 };
 
 /* Grid used to compute the cut line. Cells are squares of <res> millimeters.
@@ -336,6 +344,7 @@ struct cut_loop {
 	float *pts;            // <npts> (x,y) pairs
 	uint8_t *arc;          // NULL, or for each point: 0 = straight, 2 = clockwise arc (G2), 3 = counter-clockwise arc (G3)
 	float *ctr;            // NULL, or for each point: (x,y) center of the arc starting there
+	uint8_t *gap;          // NULL, or for each point: non-zero if the segment starting there is not cut
 	struct cut_loop *next; // next loop or NULL
 };
 
@@ -472,6 +481,8 @@ void usage(int code, const char *cmd)
 	    "     --cut-tol <mm>            cut path simplification tolerance (def: res/2)\n"
 	    "     --cut-hole <mm>           diameter of a hanging hole on top, 0=none (def: 0)\n"
 	    "     --cut-tab <mm>            diameter of the tab around the hole (def: hole+2*margin)\n"
+	    "     --cut-holds <count>       holding tabs left uncut around each piece (def: 0)\n"
+	    "     --cut-hold-len <mm>       length of each holding tab (def: 0.5)\n"
 	    "Material characteristics:\n"
 	    "  -d --diffuse <ratio>         adjacent radiation for hash & soften (def:0.18)\n"
 	    "Machine settings:\n"
@@ -2195,6 +2206,7 @@ void cut_loops_free(struct cut_loop *loops)
 		free(loops->pts);
 		free(loops->arc);
 		free(loops->ctr);
+		free(loops->gap);
 		free(loops);
 		loops = next;
 	}
@@ -2646,6 +2658,103 @@ int cut_fit(struct cut_loop *loop, float tol)
 	return 1;
 }
 
+/* returns the length in millimeters of the segment starting at point <i> of
+ * loop <loop>, straight or arc.
+ */
+double cut_seg_len(const struct cut_loop *loop, int32_t i)
+{
+	int32_t j = (i + 1) % loop->npts;
+
+	if (!loop->arc || !loop->arc[i])
+		return hypot(loop->pts[2 * j] - loop->pts[2 * i], loop->pts[2 * j + 1] - loop->pts[2 * i + 1]);
+
+	return fabs(cut_seg_sweep(loop, i)) *
+		hypot(loop->pts[2 * i] - loop->ctr[2 * i], loop->pts[2 * i + 1] - loop->ctr[2 * i + 1]);
+}
+
+/* Leaves <count> holding tabs of <len> millimeters uncut along closed loop
+ * <loop>, so that the piece remains held by the sheet once cut. They are
+ * evenly spaced along the loop, the first one being centered half a spacing
+ * after the first point, so that the first point remains cut. Segments are
+ * split at the tabs' ends, the parts of an arc remaining arcs around the same
+ * center, and the segments over the tabs are marked as gaps, which are
+ * straight. Nothing is done if the tabs would cover the whole loop. Returns
+ * non-zero on success, 0 on failure.
+ */
+int cut_add_holds(struct cut_loop *loop, int count, float len)
+{
+	int32_t n = loop->npts;
+	int32_t cap, i, k, m;
+	double total, pos, l, bound;
+	uint8_t *arc, *gap;
+	float *pts, *ctr;
+	float x, y;
+
+	total = 0;
+	for (i = 0; i < n; i++)
+		total += cut_seg_len(loop, i);
+
+	if (count <= 0 || len <= 0 || count * len >= total)
+		return 1;
+
+	cap = n + 2 * count;
+	pts = malloc(cap * 2 * sizeof(*pts));
+	ctr = calloc(cap * 2, sizeof(*ctr));
+	arc = calloc(cap, sizeof(*arc));
+	gap = calloc(cap, sizeof(*gap));
+	if (!pts || !ctr || !arc || !gap) {
+		free(pts);
+		free(ctr);
+		free(arc);
+		free(gap);
+		return 0;
+	}
+
+	/* tab boundaries are numbered from 0: even ones start a gap and odd
+	 * ones end it, so after crossing k boundaries, odd k means "in a gap".
+	 */
+	k = 0;
+	m = 0;
+	pos = 0;
+	for (i = 0; i < n; i++) {
+		l = cut_seg_len(loop, i);
+		x = loop->pts[2 * i];
+		y = loop->pts[2 * i + 1];
+		while (1) {
+			pts[2 * m] = x;
+			pts[2 * m + 1] = y;
+			gap[m] = k & 1;
+			if (!gap[m] && loop->arc && loop->arc[i]) {
+				arc[m] = loop->arc[i];
+				ctr[2 * m] = loop->ctr[2 * i];
+				ctr[2 * m + 1] = loop->ctr[2 * i + 1];
+			}
+			m++;
+
+			if (k >= 2 * count)
+				break;
+			bound = (k / 2 + 0.5) * total / count + ((k & 1) ? len / 2 : -len / 2);
+			if (bound >= pos + l)
+				break;
+			cut_seg_point(loop, i, (bound - pos) / l, &x, &y);
+			k++;
+		}
+		pos += l;
+	}
+
+	free(loop->pts);
+	free(loop->ctr);
+	free(loop->arc);
+	free(loop->gap);
+	loop->pts = pts;
+	loop->ctr = ctr;
+	loop->arc = arc;
+	loop->gap = gap;
+	loop->npts = m;
+	loop->alloc = cap;
+	return 1;
+}
+
 /* Computes into the CUT_KEEP flags of grid <grid> the piece to cut around the
  * cells having CUT_ARTWORK, using the <margin>, <bridge> width and <smooth>
  * radius expressed in cells:
@@ -2763,7 +2872,7 @@ int cut_add_circle(struct cut_loop **loops, float x, float y, float radius)
  *   - if a hanging hole is requested, add the tab to the artwork on top of the
  *     piece and compute the piece again;
  *   - trace the piece's boundaries, smooth them, make them start at their
- *     bottom-left point and simplify them.
+ *     bottom-left point, simplify them and leave the holding tabs uncut.
  * Returns non-zero on success, 0 on failure.
  */
 int cut_compute(const struct image *img, struct cut_loop **loops)
@@ -2823,6 +2932,8 @@ int cut_compute(const struct image *img, struct cut_loop **loops)
 		if (!cut_loop_set_start(loop))
 			goto out;
 		if (!cut_fit(loop, tol))
+			goto out;
+		if (!cut_add_holds(loop, cutting.holds, cutting.hold_len))
 			goto out;
 	}
 
@@ -2885,9 +2996,14 @@ int draw_cut_loops(struct image *img, const struct cut_loop *loops)
 	if (!gray_to_rgba(img))
 		return 0;
 
-	/* arcs are drawn as series of short lines of about one pixel */
+	/* arcs are drawn as series of short lines of about one pixel, and the
+	 * holding tabs are not drawn since they are not cut.
+	 */
 	for (loop = loops; loop; loop = loop->next) {
 		for (i = 0; i < loop->npts; i++) {
+			if (loop->gap && loop->gap[i])
+				continue;
+
 			parts = 1;
 			if (loop->arc && loop->arc[i])
 				parts = ceil(fabs(cut_seg_sweep(loop, i)) *
@@ -3255,7 +3371,9 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 			}
 			else if (pass->mode == PASS_MODE_CUT) {
 				/* each loop is cut separately, starting and ending at
-				 * its first point. The motion mode (G1/G2/G3) is only
+				 * its first point. Holding tabs are skipped using G0,
+				 * which turns the beam off in laser mode, as for the
+				 * raster passes. The motion mode (G0/G1/G2/G3) is only
 				 * repeated when it changes. Arc centers are given
 				 * relative to the arc's start (I/J), computed from the
 				 * rounded positions so that the start and end radii
@@ -3277,7 +3395,12 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 					for (i = 0; i < cut->npts; i++) {
 						int j = (i + 1) % cut->npts;
 
-						g = (cut->arc && cut->arc[i]) ? cut->arc[i] : 1;
+						if (cut->gap && cut->gap[i])
+							g = 0;
+						else if (cut->arc && cut->arc[i])
+							g = cut->arc[i];
+						else
+							g = 1;
 						if (g != prev_g)
 							fprintf(file, "G%d ", g);
 						prev_g = g;
@@ -3286,7 +3409,7 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 							f4(img->orgx + cut->pts[2 * j]),
 							f4(img->orgy + cut->pts[2 * j + 1]));
 
-						if (g != 1)
+						if (g >= 2)
 							fprintf(file, " I%.7g J%.7g",
 								f4(f4(img->orgx + cut->ctr[2 * i]) - f4(img->orgx + cut->pts[2 * i])),
 								f4(f4(img->orgy + cut->ctr[2 * i + 1]) - f4(img->orgy + cut->pts[2 * i + 1])));
@@ -3744,6 +3867,14 @@ int main(int argc, char **argv)
 
 		case OPT_CUT_TAB:
 			cutting.tab = arg_f;
+			break;
+
+		case OPT_CUT_HOLDS:
+			cutting.holds = arg_i;
+			break;
+
+		case OPT_CUT_HOLD_LEN:
+			cutting.hold_len = arg_f;
 			break;
 
 		case OPT_MAP: {  /* [from_min:from_max:]to_min:to_max[:gamma2] */
