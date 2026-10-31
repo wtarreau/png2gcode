@@ -116,6 +116,7 @@ enum opt {
 	OPT_CUT_HOLDS,
 	OPT_CUT_HOLD_LEN,
 	OPT_CUT_INNER,
+	OPT_CUT_BASE,
 };
 
 const struct option long_options[] = {
@@ -186,6 +187,7 @@ const struct option long_options[] = {
 	{"cut-holds",   required_argument, 0, OPT_CUT_HOLDS    },
 	{"cut-hold-len", required_argument, 0, OPT_CUT_HOLD_LEN },
 	{"cut-inner",   required_argument, 0, OPT_CUT_INNER    },
+	{"cut-base",    required_argument, 0, OPT_CUT_BASE     },
 	{0,             0,                 0, 0                }
 };
 
@@ -309,6 +311,7 @@ struct cutting {
 	int holds;       // number of holding tabs left uncut along each piece
 	float hold_len;  // length of each holding tab in mm
 	float inner;     // min diameter of a disc fitting in the inner holes to cut in mm, 0 = none
+	float base;      // length of the flat bottom as a ratio of the piece's width, 0 = none
 } cutting = {
 	.margin    = 2.0,
 	.smooth    = -1,
@@ -321,6 +324,7 @@ struct cutting {
 	.holds     = 0,
 	.hold_len  = 0.5,
 	.inner     = 0,
+	.base      = 0,
 };
 
 /* Grid used to compute the cut line. Cells are squares of <res> millimeters.
@@ -489,6 +493,7 @@ void usage(int code, const char *cmd)
 	    "     --cut-holds <count>       holding tabs left uncut around each piece (def: 0)\n"
 	    "     --cut-hold-len <mm>       length of each holding tab (def: 0.5)\n"
 	    "     --cut-inner <mm>          cut inner holes fitting a disc this size, 0=none (def: 0)\n"
+	    "     --cut-base <ratio>        flat bottom length to stand, ratio of piece width (def: 0)\n"
 	    "Material characteristics:\n"
 	    "  -d --diffuse <ratio>         adjacent radiation for hash & soften (def:0.18)\n"
 	    "Machine settings:\n"
@@ -2914,6 +2919,93 @@ int cut_add_tab(struct cut_grid *grid, float radius, float clear, int32_t *cx, i
 	return 1;
 }
 
+/* Adds a flat base to the bottom of the artwork of grid <grid> so that the
+ * piece can stand on it. The base is a horizontal line of CUT_ARTWORK cells
+ * along the lowest artwork row, so that the margin turns it into a flat
+ * bottom. Its length is <ratio> times the width of the CUT_KEEP area (the
+ * piece including its margin), and it is centered on the centroid of that
+ * area excluding the CUT_HOLE cells so that the piece doesn't tip over. It is
+ * kept within the artwork's horizontal extent so that the piece doesn't get
+ * wider, and it is extended to cover all the artwork lying less than <reach>
+ * cells above it, so that the piece rests on its lowest parts. The gaps of
+ * less than <reach> cells between the base and the artwork above it are
+ * filled so as not to leave notches in the bottom. Returns non-zero if a base
+ * was added, 0 if there is no artwork.
+ */
+int cut_add_base(struct cut_grid *grid, float ratio, float reach)
+{
+	int32_t cells = grid->w * grid->h;
+	int32_t kmin, kmax, amin, amax;
+	int32_t x, x1, x2, y, y1, ytop, p, n;
+	double sumx, len;
+
+	sumx = 0;
+	n = 0;
+	kmin = amin = grid->w;
+	kmax = amax = -1;
+	for (p = 0; p < cells; p++) {
+		x = p % grid->w;
+		if (grid->map[p] & CUT_ARTWORK) {
+			if (x < amin)
+				amin = x;
+			if (x > amax)
+				amax = x;
+		}
+		if ((grid->map[p] & (CUT_KEEP | CUT_HOLE)) != CUT_KEEP)
+			continue;
+		if (x < kmin)
+			kmin = x;
+		if (x > kmax)
+			kmax = x;
+		sumx += x;
+		n++;
+	}
+
+	for (p = 0; p < cells; p++)
+		if (grid->map[p] & CUT_ARTWORK)
+			break;
+
+	if (!n || p == cells)
+		return 0;
+
+	y = p / grid->w;
+	ytop = y + floor(reach);
+	if (ytop > grid->h - 1)
+		ytop = grid->h - 1;
+
+	len = ratio * (kmax - kmin + 1);
+	x1 = nearbyint(sumx / n - len / 2);
+	if (x1 < amin)
+		x1 = amin;
+	x2 = x1 + nearbyint(len) - 1;
+	if (x2 > amax) {
+		x1 -= x2 - amax;
+		x2 = amax;
+		if (x1 < amin)
+			x1 = amin;
+	}
+
+	for (p = y * grid->w; p < (ytop + 1) * grid->w; p++) {
+		if (!(grid->map[p] & CUT_ARTWORK))
+			continue;
+		if (p % grid->w < x1)
+			x1 = p % grid->w;
+		if (p % grid->w > x2)
+			x2 = p % grid->w;
+	}
+
+	for (x = x1; x <= x2; x++) {
+		for (y1 = y + 1; y1 <= ytop; y1++)
+			if (grid->map[y1 * grid->w + x] & CUT_ARTWORK)
+				break;
+		if (y1 > ytop)
+			y1 = y;
+		for (; y1 >= y; y1--)
+			grid->map[y1 * grid->w + x] |= CUT_ARTWORK;
+	}
+	return 1;
+}
+
 /* Prepends to list <loops> a circle of <radius> millimeters centered on
  * (<x>,<y>), made of a single full counter-clockwise arc starting and ending
  * at its bottom. Returns non-zero on success, 0 on failure.
@@ -2947,6 +3039,8 @@ int cut_add_circle(struct cut_loop **loops, float x, float y, float radius)
  * before the piece is detached. The steps are:
  *   - mark the cells covering the artwork on a grid larger than the image;
  *   - compute the piece around it (see cut_shape());
+ *   - if a flat base is requested, add it to the artwork at the bottom of the
+ *     piece and compute the piece again;
  *   - if a hanging hole is requested, add the tab to the artwork on top of the
  *     piece and compute the piece again;
  *   - if inner holes are requested, keep the large enough ones (see
@@ -3008,6 +3102,14 @@ int cut_compute(const struct image *img, struct cut_loop **loops)
 
 	if (cutting.inner > 0 && !cut_select_holes(&grid, cutting.inner / 2 / res))
 		goto out;
+
+	if (cutting.base > 0 && cut_add_base(&grid, cutting.base, (margin + smooth) / res)) {
+		if (!cut_shape(&grid, margin / res, bridge / res, smooth / res))
+			goto out;
+
+		if (cutting.inner > 0 && !cut_select_holes(&grid, cutting.inner / 2 / res))
+			goto out;
+	}
 
 	cx = -1;
 	if (cutting.hole > 0) {
@@ -4001,6 +4103,10 @@ int main(int argc, char **argv)
 
 		case OPT_CUT_INNER:
 			cutting.inner = arg_f;
+			break;
+
+		case OPT_CUT_BASE:
+			cutting.base = arg_f;
 			break;
 
 		case OPT_MAP: {  /* [from_min:from_max:]to_min:to_max[:gamma2] */
