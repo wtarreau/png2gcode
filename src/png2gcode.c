@@ -19,7 +19,7 @@
 #define DEFAULT_FEED_CUT         300
 
 /* max number of arguments for a transformation */
-#define MAX_XFRM_ARGS 10
+#define MAX_XFRM_ARGS 18
 
 /* max number of output levels of a dithering transformation, which stores its
  * algorithm and its number of levels before them.
@@ -521,7 +521,8 @@ void usage(int code, const char *cmd)
 	    "     --soften <value>          subtract neighbors' average times <value>\n"
 	    "     --map <args[2..5]>        map values [from_min:from_max:]to_min:to_max[:gamma2]\n"
 	    "     --max-length <pixels>     limit long series for use with FS dithering (def: 0)\n"
-	    "     --dither <algo>           dither to black and white (fs,atkinson)\n"
+	    "     --dither <algo>[:<list>]  dither using <algo> (fs,atkinson) to the lightness\n"
+	    "                               levels in comma-separated <list> (def: 0,1)\n"
 	    "     --text-fg-value <value>   set FG value for future text (def: 1.0)\n"
 	    "     --text-fg-alpha <value>   set FG alpha for future text (def: 1.0)\n"
 	    "     --text-bg-value <value>   set BG value for future text (def: 0.0)\n"
@@ -4260,22 +4261,61 @@ int main(int argc, char **argv)
 			break;
 		}
 
-		case OPT_DITHER: {  /* <algo> */
-			float args[4];
-			int algo;
+		case OPT_DITHER: {  /* <algo>[:<comma-separated levels in any order>] */
+			float args[MAX_XFRM_ARGS];
+			char *nptr = strchr(optarg, ':');
+			size_t len = nptr ? (size_t)(nptr - optarg) : strlen(optarg);
+			char *endptr;
+			int algo, nb, i, j;
+			float v;
 
 			for (algo = 0; algo < DITHER_ALGOS; algo++)
-				if (strcmp(optarg, dither_names[algo]) == 0)
+				if (strlen(dither_names[algo]) == len && strncmp(optarg, dither_names[algo], len) == 0)
 					break;
 			if (algo == DITHER_ALGOS)
 				die(1, "unknown dithering algorithm <%s>\n", optarg);
 
-			/* black and white */
 			args[0] = algo;
-			args[1] = 2;
-			args[2] = 0.0;
-			args[3] = 1.0;
-			curr = xfrm_new(curr, XFRM_DITHER, 4, args);
+			if (!nptr) {
+				/* black and white */
+				args[1] = 2;
+				args[2] = 0.0;
+				args[3] = 1.0;
+				nb = 2;
+			}
+			else {
+				nb = 0;
+				nptr++;
+				while (1) {
+					v = strtof(nptr, &endptr);
+					if (endptr == nptr || (*endptr && *endptr != ','))
+						die(1, "unparsable dither levels <%s> (char %d)\n", optarg, endptr - optarg);
+					if (v < 0.0 || v > 1.0)
+						die(1, "dither <%s>: levels must be within [0..1]\n", optarg);
+
+					/* insert it sorted, and only once */
+					for (i = 0; i < nb && args[2 + i] < v; i++)
+						;
+					if (i == nb || args[2 + i] != v) {
+						if (nb == MAX_DITHER_LEVELS)
+							die(1, "dither <%s>: no more than %d levels\n", optarg, MAX_DITHER_LEVELS);
+						for (j = nb; j > i; j--)
+							args[2 + j] = args[2 + j - 1];
+						args[2 + i] = v;
+						nb++;
+					}
+
+					if (!*endptr)
+						break;
+					nptr = endptr + 1;
+				}
+
+				if (nb < 2)
+					die(1, "dither <%s>: at least two different levels are needed\n", optarg);
+				args[1] = nb;
+			}
+
+			curr = xfrm_new(curr, XFRM_DITHER, 2 + nb, args);
 			if (!curr)
 				die(1, "failed to allocate a new transformation\n");
 			if (!xfrm)
