@@ -2880,19 +2880,13 @@ int cut_compute(const struct image *img, struct cut_loop **loops)
 	struct cut_grid grid;
 	struct cut_loop *loop;
 	float res, pad, smooth, bridge, tol;
-	float area, tab, clear;
+	float area, tab, clear, margin;
 	int32_t cx, cy;
 	int ret = 0;
 
 	*loops = NULL;
 	smooth = cutting.smooth >= 0 ? cutting.smooth : cutting.margin;
 	bridge = cutting.bridge >= 0 ? cutting.bridge : fmax(3.0, 2 * cutting.margin);
-
-	/* the hole's center must be far enough from the artwork for both the
-	 * tab and the margin around the hole.
-	 */
-	tab = cutting.tab >= 0 ? cutting.tab : cutting.hole + 2 * cutting.margin;
-	clear = fmax(tab / 2, cutting.hole / 2 + cutting.margin);
 
 	res = cutting.res;
 	if (res <= 0) {
@@ -2903,15 +2897,31 @@ int cut_compute(const struct image *img, struct cut_loop **loops)
 	}
 	tol = cutting.tol >= 0 ? cutting.tol : res / 2;
 
+	/* The margin is a minimum, so the one used on the grid is increased
+	 * by the possible errors that could bring the line closer to the
+	 * artwork: an artwork cell's center may be up to half a cell diagonal
+	 * away from the artwork it covers, the traced line passes half a cell
+	 * closer than the first non-kept cells' centers, the smoothing may
+	 * move points by up to about half a cell at sharp corners, and the
+	 * fitting by up to the tolerance.
+	 */
+	margin = cutting.margin + res * (1 + M_SQRT1_2) + tol;
+
+	/* the hole's center must be far enough from the artwork for both the
+	 * tab and the margin around the hole.
+	 */
+	tab = cutting.tab >= 0 ? cutting.tab : cutting.hole + 2 * cutting.margin;
+	clear = fmax(tab / 2, cutting.hole / 2 + margin);
+
 	/* the closing must not reach the grid's border, even above the tab */
-	pad = cutting.margin + smooth + 2 * res;
+	pad = margin + smooth + 2 * res;
 	if (cutting.hole > 0)
 		pad += clear + tab / 2;
 
 	if (!cut_grid_init(&grid, img, res, pad, cutting.threshold))
 		goto out;
 
-	if (!cut_shape(&grid, cutting.margin / res, bridge / res, smooth / res))
+	if (!cut_shape(&grid, margin / res, bridge / res, smooth / res))
 		goto out;
 
 	cx = -1;
@@ -2919,7 +2929,7 @@ int cut_compute(const struct image *img, struct cut_loop **loops)
 		if (!cut_add_tab(&grid, tab / 2 / res, clear / res, &cx, &cy))
 			goto out;
 
-		if (cx >= 0 && !cut_shape(&grid, cutting.margin / res, bridge / res, smooth / res))
+		if (cx >= 0 && !cut_shape(&grid, margin / res, bridge / res, smooth / res))
 			goto out;
 	}
 
