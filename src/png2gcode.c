@@ -29,6 +29,9 @@
 /* flags describing each cell of the cut grid */
 #define CUT_ARTWORK  0x01 // the cell covers some artwork
 
+/* squared distance of cells that are not reachable from any feature cell */
+#define CUT_INF 1e20
+
 struct image {
 	int32_t w;     // width in pixels
 	int32_t h;     // height in pixels
@@ -258,7 +261,8 @@ int raster_ubw = 0;
 
 /* Grid used to compute the cut line. Cells are squares of <res> millimeters.
  * Cell (x,y) covers image-relative coordinates from x0+x*res to x0+(x+1)*res
- * and from y0+y*res to y0+(y+1)*res.
+ * and from y0+y*res to y0+(y+1)*res. Distances in <dist> are expressed in
+ * cells.
  */
 struct cut_grid {
 	int32_t w;    // width in cells
@@ -267,6 +271,7 @@ struct cut_grid {
 	float x0;     // image-relative X of the grid's left border in millimeters
 	float y0;     // image-relative Y of the grid's bottom border in millimeters
 	uint8_t *map; // CUT_* flags for each cell
+	float *dist;  // squared distances for each cell, see cut_edt()
 };
 
 
@@ -1565,6 +1570,7 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 void cut_grid_free(struct cut_grid *grid)
 {
 	free(grid->map);
+	free(grid->dist);
 	memset(grid, 0, sizeof(*grid));
 }
 
@@ -1598,8 +1604,9 @@ int cut_grid_init(struct cut_grid *grid, const struct image *img, float res, flo
 	grid->w = ceil((img->mmw + 2 * pad) / res);
 	grid->h = ceil((img->mmh + 2 * pad) / res);
 
-	grid->map = calloc((size_t)grid->w * grid->h, sizeof(*grid->map));
-	if (!grid->map)
+	grid->map  = calloc((size_t)grid->w * grid->h, sizeof(*grid->map));
+	grid->dist = malloc((size_t)grid->w * grid->h * sizeof(*grid->dist));
+	if (!grid->map || !grid->dist)
 		return 0;
 
 	for (y = 0; y < img->h; y++) {
@@ -1621,6 +1628,88 @@ int cut_grid_init(struct cut_grid *grid, const struct image *img, float res, flo
 		}
 	}
 	return 1;
+}
+
+/* Computes into <d> the 1D squared distance transform of the <n> samples of
+ * <f>, taken every <stride> entries, that is, for each q, the min over all p
+ * of (q-p)^2 + f[p*stride]. <v> and <z>
+ * are work areas of <n> and <n>+1 entries respectively. This uses the lower
+ * envelope of parabolas algorithm from P. Felzenszwalb and D. Huttenlocher,
+ * "Distance Transforms of Sampled Functions", which runs in linear time: each
+ * sample is the base of a parabola, the envelope is built from left to right
+ * by eliminating the parabolas it hides (z[] holds the boundaries between the
+ * visible ones), then it is evaluated at each position.
+ */
+void edt_1d(const float *f, int32_t stride, float *d, int32_t *v, double *z, int32_t n)
+{
+	int32_t k, q;
+	double s;
+
+	k = 0;
+	v[0] = 0;
+	z[0] = -CUT_INF;
+	z[1] = CUT_INF;
+
+	for (q = 1; q < n; q++) {
+		while (1) {
+			s = ((f[q * stride] + (double)q * q) - (f[v[k] * stride] + (double)v[k] * v[k])) / (2.0 * (q - v[k]));
+			if (s > z[k] || !k)
+				break;
+			k--;
+		}
+		k++;
+		v[k] = q;
+		z[k] = s;
+		z[k + 1] = CUT_INF;
+	}
+
+	k = 0;
+	for (q = 0; q < n; q++) {
+		while (z[k + 1] < q)
+			k++;
+		d[q] = (double)(q - v[k]) * (q - v[k]) + f[v[k] * stride];
+	}
+}
+
+/* Turns the <dist> plane of grid <grid>, which must contain 0 for feature
+ * cells and CUT_INF for other cells, into the squared euclidean distance in
+ * cells from each cell to the nearest feature cell. The 2D transform is made
+ * of a 1D transform on each row followed by a 1D transform on each column,
+ * each going through a temporary line before replacing the original one.
+ * Returns non-zero on success, 0 on failure.
+ */
+int cut_edt(struct cut_grid *grid)
+{
+	int32_t n = grid->w > grid->h ? grid->w : grid->h;
+	int32_t x, y;
+	float *d;
+	int32_t *v;
+	double *z;
+	int ret = 0;
+
+	d = malloc(n * sizeof(*d));
+	v = malloc(n * sizeof(*v));
+	z = malloc((n + 1) * sizeof(*z));
+	if (!d || !v || !z)
+		goto out;
+
+	for (y = 0; y < grid->h; y++) {
+		edt_1d(grid->dist + y * grid->w, 1, d, v, z, grid->w);
+		for (x = 0; x < grid->w; x++)
+			grid->dist[y * grid->w + x] = d[x];
+	}
+
+	for (x = 0; x < grid->w; x++) {
+		edt_1d(grid->dist + x, grid->w, d, v, z, grid->h);
+		for (y = 0; y < grid->h; y++)
+			grid->dist[y * grid->w + x] = d[y];
+	}
+	ret = 1;
+ out:
+	free(d);
+	free(v);
+	free(z);
+	return ret;
 }
 
 /* create a new g-code pass from previous known one */
