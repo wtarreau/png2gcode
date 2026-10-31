@@ -2143,7 +2143,7 @@ int main(int argc, char **argv)
 	struct xfrm *xfrm = NULL;
 	const char  *in  = NULL;
 	const char  *out = NULL;
-	struct image img;
+	struct image img = { 0 };
 
 	while (1) {
 		int option_index = 0;
