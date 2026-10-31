@@ -16,6 +16,7 @@
 #define DEFAULT_SPINDLE_RASTER   255
 #define DEFAULT_FEED_SHOW        4800
 #define DEFAULT_FEED_RASTER      1200
+#define DEFAULT_FEED_CUT         300
 
 /* max number of arguments for a transformation */
 #define MAX_XFRM_ARGS 10
@@ -29,10 +30,14 @@
 /* flags describing each cell of the cut grid */
 #define CUT_ARTWORK  0x01 // the cell covers some artwork
 #define CUT_KEEP     0x02 // the cell belongs to the piece to cut
+#define CUT_OUTSIDE  0x04 // the cell is reachable from the grid's border
 #define CUT_SEEN     0x08 // the boundary between this cell and its right one was traced
 
 /* squared distance of cells that are not reachable from any feature cell */
 #define CUT_INF 1e20
+
+/* max number of cells of a cut grid using an automatic resolution */
+#define CUT_MAX_CELLS (16 * 1024 * 1024)
 
 struct image {
 	int32_t w;     // width in pixels
@@ -94,6 +99,9 @@ enum opt {
 	OPT_TEXT_ZOOM,
 	OPT_TEXT,
 	OPT_UBW,
+	OPT_CUT_MARGIN,
+	OPT_CUT_THRESHOLD,
+	OPT_CUT_RES,
 };
 
 const struct option long_options[] = {
@@ -153,6 +161,9 @@ const struct option long_options[] = {
 	{"text-zoom",   required_argument, 0, OPT_TEXT_ZOOM    },
 	{"text",        required_argument, 0, OPT_TEXT         },
 	{"raster-ubw",  no_argument,       0, OPT_UBW          },
+	{"cut-margin",  required_argument, 0, OPT_CUT_MARGIN   },
+	{"cut-threshold", required_argument, 0, OPT_CUT_THRESHOLD },
+	{"cut-res",     required_argument, 0, OPT_CUT_RES      },
 	{0,             0,                 0, 0                }
 };
 
@@ -195,6 +206,7 @@ enum pass_mode {
 	PASS_MODE_RASTER,     // raster image, bidirectional
 	PASS_MODE_RASTER_LR,  // raster image left-to-right only
 	PASS_MODE_CONTOUR,    // move along the image's countour
+	PASS_MODE_CUT,        // cut around the artwork at a distance
 	PASS_MODES            // must be last one
 };
 
@@ -208,6 +220,7 @@ const char *pass_mode_names[PASS_MODES] = {
 	[PASS_MODE_RASTER]    = "raster",
 	[PASS_MODE_RASTER_LR] = "raster-lr",
 	[PASS_MODE_CONTOUR]   = "contour",
+	[PASS_MODE_CUT]       = "cut",
 };
 
 struct pass {
@@ -260,6 +273,17 @@ struct move_queue {
 
 /* raster preferences */
 int raster_ubw = 0;
+
+/* settings of the cut line around the artwork */
+struct cutting {
+	float margin;    // min distance between the artwork and the cut line in mm
+	float threshold; // pixels above this work value are artwork
+	float res;       // cut grid cell size in mm, <=0 = auto
+} cutting = {
+	.margin    = 2.0,
+	.threshold = 0,
+	.res       = 0,
+};
 
 /* Grid used to compute the cut line. Cells are squares of <res> millimeters.
  * Cell (x,y) covers image-relative coordinates from x0+x*res to x0+(x+1)*res
@@ -397,10 +421,14 @@ void usage(int code, const char *cmd)
 	    "     --text-zoom <int>         set integer zoom value for future text (def: 1)\n"
 	    "     --text [@<align>:]<msg>   write/append <msg>. align=[{bct}][{lcr}]\n"
 	    "Passes are used in G-CODE output format (-f gcode):\n"
-	    "  -M --mode    <mode>          pass mode (origin,x,y,axis,diag,frame,raster,raster-lr)\n"
-	    "  -F --feed    <value>         feed rate (mm/min, def:4800 frame, 1200 raster)\n"
+	    "  -M --mode    <mode>          pass mode (origin,x,y,axis,diag,frame,raster,raster-lr,cut)\n"
+	    "  -F --feed    <value>         feed rate (mm/min, def:4800 frame, 1200 raster, 300 cut)\n"
 	    "  -S --spindle <value>         spindle value for intensity 1.0 (def:1 or 255)\n"
 	    "  -P --passes  <value>         number of passes with previous parameters (def:1)\n"
+	    "Cut line settings (-M cut):\n"
+	    "     --cut-margin <mm>         min distance from the artwork to the cut line (def: 2.0)\n"
+	    "     --cut-threshold <value>   pixels above this intensity are artwork (def: 0.0)\n"
+	    "     --cut-res <mm>            cut computation resolution (def: min(pixel size,0.1))\n"
 	    "Material characteristics:\n"
 	    "  -d --diffuse <ratio>         adjacent radiation for hash & soften (def:0.18)\n"
 	    "Machine settings:\n"
@@ -1724,6 +1752,58 @@ int cut_edt(struct cut_grid *grid)
 	return ret;
 }
 
+/* fills <nb> with the indexes of the 4 direct neighbours of cell <p> in grid
+ * <grid>, or -1 for those which would be outside of the grid.
+ */
+void cut_neighbours(const struct cut_grid *grid, int32_t p, int32_t *nb)
+{
+	int32_t x = p % grid->w;
+	int32_t y = p / grid->w;
+
+	nb[0] = x > 0 ? p - 1 : -1;
+	nb[1] = x < grid->w - 1 ? p + 1 : -1;
+	nb[2] = y > 0 ? p - grid->w : -1;
+	nb[3] = y < grid->h - 1 ? p + grid->w : -1;
+}
+
+/* Sets CUT_OUTSIDE on all cells of grid <grid> without CUT_KEEP that can be
+ * reached from the bottom left cell through other such cells using
+ * 4-connectivity, then sets CUT_KEEP on all cells not having CUT_OUTSIDE, so
+ * that holes in the piece are filled. The bottom left cell must not have
+ * CUT_KEEP. Returns non-zero on success, 0 on failure.
+ */
+int cut_fill_outside(struct cut_grid *grid)
+{
+	int32_t cells = grid->w * grid->h;
+	int32_t *stack;
+	int32_t p, sp, n;
+	int32_t nb[4];
+
+	stack = malloc(cells * sizeof(*stack));
+	if (!stack)
+		return 0;
+
+	sp = 0;
+	grid->map[0] |= CUT_OUTSIDE;
+	stack[sp++] = 0;
+	while (sp) {
+		p = stack[--sp];
+		cut_neighbours(grid, p, nb);
+		for (n = 0; n < 4; n++) {
+			if (nb[n] < 0 || grid->map[nb[n]] & (CUT_KEEP | CUT_OUTSIDE))
+				continue;
+			grid->map[nb[n]] |= CUT_OUTSIDE;
+			stack[sp++] = nb[n];
+		}
+	}
+	free(stack);
+
+	for (p = 0; p < cells; p++)
+		if (!(grid->map[p] & CUT_OUTSIDE))
+			grid->map[p] |= CUT_KEEP;
+	return 1;
+}
+
 /* appends point (<x>,<y>) to loop <loop>. Returns non-zero on success, 0 on
  * failure.
  */
@@ -1754,6 +1834,25 @@ void cut_loops_free(struct cut_loop *loops)
 		free(loops->pts);
 		free(loops);
 		loops = next;
+	}
+}
+
+/* computes the extent of the non-empty list of loops <loops> into <minx>,
+ * <maxx>, <miny> and <maxy>.
+ */
+void cut_loops_extent(const struct cut_loop *loops, float *minx, float *maxx, float *miny, float *maxy)
+{
+	int32_t i;
+
+	*minx = *maxx = loops->pts[0];
+	*miny = *maxy = loops->pts[1];
+	for (; loops; loops = loops->next) {
+		for (i = 0; i < loops->npts; i++) {
+			*minx = fmin(*minx, loops->pts[2 * i]);
+			*maxx = fmax(*maxx, loops->pts[2 * i]);
+			*miny = fmin(*miny, loops->pts[2 * i + 1]);
+			*maxy = fmax(*maxy, loops->pts[2 * i + 1]);
+		}
 	}
 }
 
@@ -1849,6 +1948,75 @@ int cut_trace(struct cut_grid *grid, struct cut_loop **loops)
 		}
 	}
 	return 1;
+}
+
+/* Computes the cut line around the artwork of image <img> according to the
+ * <cutting> settings, and returns it in <loops> as a list of closed loops with
+ * image-relative coordinates in millimeters. The list is empty when there is
+ * no artwork, and contains one loop per separate piece. The steps are:
+ *   - mark the cells covering the artwork on a grid larger than the image;
+ *   - keep the cells within the margin of the artwork (distance transform);
+ *   - fill the holes so that only outer boundaries remain;
+ *   - trace these boundaries.
+ * Returns non-zero on success, 0 on failure.
+ */
+int cut_compute(const struct image *img, struct cut_loop **loops)
+{
+	struct cut_grid grid;
+	float res, pad;
+	float margin, area;
+	int32_t cells, p;
+	int ret = 0;
+
+	*loops = NULL;
+
+	res = cutting.res;
+	if (res <= 0) {
+		res = fmin(fmin(img->mmw / img->w, img->mmh / img->h), 0.1);
+		area = (img->mmw + 2 * cutting.margin) * (img->mmh + 2 * cutting.margin);
+		if (area / (res * res) > CUT_MAX_CELLS)
+			res = sqrt(area / CUT_MAX_CELLS);
+	}
+
+	/* the kept area must not reach the grid's border */
+	pad = cutting.margin + 2 * res;
+	if (!cut_grid_init(&grid, img, res, pad, cutting.threshold))
+		goto out;
+
+	cells = grid.w * grid.h;
+	for (p = 0; p < cells; p++)
+		grid.dist[p] = (grid.map[p] & CUT_ARTWORK) ? 0 : CUT_INF;
+
+	if (!cut_edt(&grid))
+		goto out;
+
+	margin = cutting.margin / res;
+	for (p = 0; p < cells; p++)
+		if (grid.dist[p] <= margin * margin)
+			grid.map[p] |= CUT_KEEP;
+
+	if (!cut_fill_outside(&grid))
+		goto out;
+
+	if (!cut_trace(&grid, loops))
+		goto out;
+	ret = 1;
+ out:
+	if (!ret) {
+		cut_loops_free(*loops);
+		*loops = NULL;
+	}
+	cut_grid_free(&grid);
+	return ret;
+}
+
+/* returns non-zero if any pass of list <passes> is a cut pass */
+int has_cut_pass(const struct pass *passes)
+{
+	for (; passes; passes = passes->next)
+		if (passes->mode == PASS_MODE_CUT)
+			return 1;
+	return 0;
 }
 
 /* create a new g-code pass from previous known one */
@@ -1949,8 +2117,11 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 	float pxw = img->mmw / img->w;
 	float br = fabs(machine.beam_w / 2.0); // beam radius
 	struct move_queue move_queue = { 0 };
+	struct cut_loop *cut_loops = NULL;
+	struct cut_loop *cut;
 	char *now_str, *p;
 	time_t now;
+	int i;
 
 	if (out) {
 		file = fopen(out, "w");
@@ -1971,6 +2142,9 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 	for (pass = passes; pass; pass = pass->next)
 		pass_cnt += pass->passes;
 
+	if (has_cut_pass(passes) && !cut_compute(img, &cut_loops))
+		return 0;
+
 	now = time(NULL);
 	now_str = ctime(&now);
 	p = strchr(now_str, '\n');
@@ -1981,6 +2155,13 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 	fprintf(file, "; Original image size: %ux%u pixels, %.7gx%.7g mm\n", img->w, img->h, f4(img->mmw), f4(img->mmh));
 	fprintf(file, "; Work area: %.7g,%.7g -> %.7g,%.7g mm\n", f4(img->orgx), f4(img->orgy), f4(img->orgx+img->mmw), f4(img->orgy+img->mmh));
 	fprintf(file, "; Pixel size: %.7gx%.7g mm\n", f4(pxw), f4(img->mmh / img->h));
+	if (cut_loops) {
+		float minx, maxx, miny, maxy;
+
+		cut_loops_extent(cut_loops, &minx, &maxx, &miny, &maxy);
+		fprintf(file, "; Cut area: %.7g,%.7g -> %.7g,%.7g mm\n",
+			f4(img->orgx + minx), f4(img->orgy + miny), f4(img->orgx + maxx), f4(img->orgy + maxy));
+	}
 	if (img->diam > 0)
 		fprintf(file, "; Center: 0,0, Max radius: %.7g mm, Diameter: %.7g mm\n", f4(img->diam / 2), f4(img->diam));
 	fprintf(file, "; Total of %d passes\n", pass_cnt);
@@ -2026,11 +2207,14 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 
 			pass_num++;
 
-			if (base_feed < 0)
+			if (base_feed < 0 && pass->mode == PASS_MODE_CUT)
+				base_feed = DEFAULT_FEED_CUT;
+			else if (base_feed < 0)
 				base_feed = (pass->mode == PASS_MODE_RASTER || pass->mode == PASS_MODE_RASTER_LR || pass->mode == PASS_MODE_CONTOUR) ?
 					DEFAULT_FEED_RASTER : DEFAULT_FEED_SHOW;
 			if (base_spindle < 0)
-				base_spindle = (pass->mode == PASS_MODE_RASTER || pass->mode == PASS_MODE_RASTER_LR || pass->mode == PASS_MODE_CONTOUR) ?
+				base_spindle = (pass->mode == PASS_MODE_RASTER || pass->mode == PASS_MODE_RASTER_LR ||
+						pass->mode == PASS_MODE_CONTOUR || pass->mode == PASS_MODE_CUT) ?
 					DEFAULT_SPINDLE_RASTER : DEFAULT_SPINDLE_SHOW;
 
 			fprintf(file, "; pass %d-%d/%d : mode=%s spindle=%d feed=%d\n",
@@ -2170,6 +2354,29 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 
 			contour_end:
 				fprintf(file, "M5 S0\nG0 X0 Y0\n");
+			}
+			else if (pass->mode == PASS_MODE_CUT) {
+				/* each loop is cut separately, starting and ending at
+				 * its first point.
+				 */
+				if (!cut_loops)
+					fprintf(file, "; empty image\n");
+
+				for (cut = cut_loops; cut; cut = cut->next) {
+					fprintf(file, "G0 X%.7g Y%.7g\n%s S%d\nG1 F%d\n",
+						f4(img->orgx + cut->pts[0]),
+						f4(img->orgy + cut->pts[1]),
+						machine.laser_on,
+						base_spindle,
+						base_feed);
+
+					for (i = 1; i <= cut->npts; i++)
+						fprintf(file, "X%.7g Y%.7g\n",
+							f4(img->orgx + cut->pts[2 * (i % cut->npts)]),
+							f4(img->orgy + cut->pts[2 * (i % cut->npts) + 1]));
+
+					fprintf(file, "M5 S0\n");
+				}
 			}
 			else if (pass->mode == PASS_MODE_RASTER || pass->mode == PASS_MODE_RASTER_LR) {
 				int x, y, x0;
@@ -2426,6 +2633,7 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 		"G0 X0 Y0; go back to origin\n"
 		);
 
+	cut_loops_free(cut_loops);
 	return 1;
 }
 
@@ -2586,6 +2794,18 @@ int main(int argc, char **argv)
 
 		case OPT_UBW:
 			raster_ubw = 1;
+			break;
+
+		case OPT_CUT_MARGIN:
+			cutting.margin = arg_f;
+			break;
+
+		case OPT_CUT_THRESHOLD:
+			cutting.threshold = arg_f;
+			break;
+
+		case OPT_CUT_RES:
+			cutting.res = arg_f;
 			break;
 
 		case OPT_MAP: {  /* [from_min:from_max:]to_min:to_max[:gamma2] */
