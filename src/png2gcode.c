@@ -2632,16 +2632,49 @@ int cut_fit(struct cut_loop *loop, float tol)
 	return 1;
 }
 
+/* Computes into the CUT_KEEP flags of grid <grid> the piece to cut around the
+ * cells having CUT_ARTWORK, using the <margin>, <bridge> width and <smooth>
+ * radius expressed in cells:
+ *   - keep the cells within the margin of the artwork (distance transform);
+ *   - join the separate parts with bridges;
+ *   - round the area with a ball of the smoothing radius;
+ *   - fill the holes so that only outer boundaries remain.
+ * Any previous CUT_KEEP and CUT_OUTSIDE flags are cleared first. Returns
+ * non-zero on success, 0 on failure.
+ */
+int cut_shape(struct cut_grid *grid, float margin, float bridge, float smooth)
+{
+	int32_t cells = grid->w * grid->h;
+	int32_t p;
+
+	for (p = 0; p < cells; p++) {
+		grid->map[p] &= ~(CUT_KEEP | CUT_OUTSIDE);
+		grid->dist[p] = (grid->map[p] & CUT_ARTWORK) ? 0 : CUT_INF;
+	}
+
+	if (!cut_edt(grid))
+		return 0;
+
+	for (p = 0; p < cells; p++)
+		if (grid->dist[p] <= margin * margin)
+			grid->map[p] |= CUT_KEEP;
+
+	if (bridge > 0 && !cut_bridge(grid, bridge))
+		return 0;
+
+	if (smooth > 0 && !cut_close(grid, smooth))
+		return 0;
+
+	return cut_fill_outside(grid);
+}
+
 /* Computes the cut line around the artwork of image <img> according to the
  * <cutting> settings, and returns it in <loops> as a list of closed loops with
  * image-relative coordinates in millimeters. The list is empty when there is
  * no artwork, and contains one loop per separate piece. The steps are:
  *   - mark the cells covering the artwork on a grid larger than the image;
- *   - keep the cells within the margin of the artwork (distance transform);
- *   - join the separate parts with bridges;
- *   - round the area with a ball of the smoothing radius;
- *   - fill the holes so that only outer boundaries remain;
- *   - trace these boundaries, smooth them, make them start at their
+ *   - compute the piece around it (see cut_shape());
+ *   - trace the piece's boundaries, smooth them, make them start at their
  *     bottom-left point and simplify them.
  * Returns non-zero on success, 0 on failure.
  */
@@ -2650,8 +2683,7 @@ int cut_compute(const struct image *img, struct cut_loop **loops)
 	struct cut_grid grid;
 	struct cut_loop *loop;
 	float res, pad, smooth, bridge, tol;
-	float margin, area;
-	int32_t cells, p;
+	float area;
 	int ret = 0;
 
 	*loops = NULL;
@@ -2672,25 +2704,7 @@ int cut_compute(const struct image *img, struct cut_loop **loops)
 	if (!cut_grid_init(&grid, img, res, pad, cutting.threshold))
 		goto out;
 
-	cells = grid.w * grid.h;
-	for (p = 0; p < cells; p++)
-		grid.dist[p] = (grid.map[p] & CUT_ARTWORK) ? 0 : CUT_INF;
-
-	if (!cut_edt(&grid))
-		goto out;
-
-	margin = cutting.margin / res;
-	for (p = 0; p < cells; p++)
-		if (grid.dist[p] <= margin * margin)
-			grid.map[p] |= CUT_KEEP;
-
-	if (bridge > 0 && !cut_bridge(&grid, bridge / res))
-		goto out;
-
-	if (smooth > 0 && !cut_close(&grid, smooth / res))
-		goto out;
-
-	if (!cut_fill_outside(&grid))
+	if (!cut_shape(&grid, cutting.margin / res, bridge / res, smooth / res))
 		goto out;
 
 	if (!cut_trace(&grid, loops))
