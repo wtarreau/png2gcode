@@ -39,6 +39,11 @@
 /* max number of cells of a cut grid using an automatic resolution */
 #define CUT_MAX_CELLS (16 * 1024 * 1024)
 
+/* max number of points a fitted line may give up to end where the points stop
+ * being exactly aligned, so that it doesn't bend towards the next curve.
+ */
+#define CUT_LINE_TRIM 4
+
 struct image {
 	int32_t w;     // width in pixels
 	int32_t h;     // height in pixels
@@ -104,6 +109,7 @@ enum opt {
 	OPT_CUT_BRIDGE,
 	OPT_CUT_THRESHOLD,
 	OPT_CUT_RES,
+	OPT_CUT_TOL,
 };
 
 const struct option long_options[] = {
@@ -168,6 +174,7 @@ const struct option long_options[] = {
 	{"cut-bridge",  required_argument, 0, OPT_CUT_BRIDGE   },
 	{"cut-threshold", required_argument, 0, OPT_CUT_THRESHOLD },
 	{"cut-res",     required_argument, 0, OPT_CUT_RES      },
+	{"cut-tol",     required_argument, 0, OPT_CUT_TOL      },
 	{0,             0,                 0, 0                }
 };
 
@@ -285,12 +292,14 @@ struct cutting {
 	float bridge;    // width of the bridges joining separate parts in mm, 0 = none, <0 = auto
 	float threshold; // pixels above this work value are artwork
 	float res;       // cut grid cell size in mm, <=0 = auto
+	float tol;       // path simplification tolerance in mm, <0 = auto
 } cutting = {
 	.margin    = 2.0,
 	.smooth    = -1,
 	.bridge    = -1,
 	.threshold = 0,
 	.res       = 0,
+	.tol       = -1,
 };
 
 /* Grid used to compute the cut line. Cells are squares of <res> millimeters.
@@ -452,6 +461,7 @@ void usage(int code, const char *cmd)
 	    "     --cut-bridge <mm>         width of bridges joining parts, 0=none (def: max(3,2*margin))\n"
 	    "     --cut-threshold <value>   pixels above this intensity are artwork (def: 0.0)\n"
 	    "     --cut-res <mm>            cut computation resolution (def: min(pixel size,0.1))\n"
+	    "     --cut-tol <mm>            cut path simplification tolerance (def: res/2)\n"
 	    "Material characteristics:\n"
 	    "  -d --diffuse <ratio>         adjacent radiation for hash & soften (def:0.18)\n"
 	    "Machine settings:\n"
@@ -2341,6 +2351,256 @@ int cut_trace(struct cut_grid *grid, struct cut_loop **loops)
 	return 1;
 }
 
+/* Smooths closed loop <loop> by replacing each point with the weighted average
+ * (1,2,1)/4 of itself and its neighbours, <passes> times. The traced points
+ * follow cell borders, so they zigzag by up to about one cell around the real
+ * shape. This noise would prevent arcs from being recognized within a fine
+ * tolerance, while two passes are enough to remove most of it, and only move
+ * a smooth curve of radius r by about res^2/r. Returns non-zero on success, 0
+ * on failure.
+ */
+int cut_smooth_loop(struct cut_loop *loop, int passes)
+{
+	int32_t n = loop->npts;
+	int32_t i, h, j;
+	float *orig;
+
+	if (n < 3)
+		return 1;
+
+	orig = malloc(n * 2 * sizeof(*orig));
+	if (!orig)
+		return 0;
+
+	while (passes--) {
+		memcpy(orig, loop->pts, n * 2 * sizeof(*orig));
+		for (i = 0; i < n; i++) {
+			h = (i + n - 1) % n;
+			j = (i + 1) % n;
+			loop->pts[2 * i] = (orig[2 * h] + 2 * orig[2 * i] + orig[2 * j]) / 4;
+			loop->pts[2 * i + 1] = (orig[2 * h + 1] + 2 * orig[2 * i + 1] + orig[2 * j + 1]) / 4;
+		}
+	}
+	free(orig);
+	return 1;
+}
+
+/* returns the address of the (x,y) coordinates of point <i> of loop <loop>,
+ * modulo the number of points.
+ */
+const float *cut_pt(const struct cut_loop *loop, int32_t i)
+{
+	return loop->pts + 2 * (i % loop->npts);
+}
+
+/* returns non-zero if all points of loop <loop> between indexes <a> and <b>
+ * (modulo the number of points) are within <tol> of the segment joining them.
+ */
+int cut_fit_line(const struct cut_loop *loop, int32_t a, int32_t b, float tol)
+{
+	const float *pa = cut_pt(loop, a);
+	const float *pb = cut_pt(loop, b);
+	const float *pi;
+	int32_t i;
+
+	for (i = a + 1; i < b; i++) {
+		pi = cut_pt(loop, i);
+		if (seg_sqdist(pi[0], pi[1], pa[0], pa[1], pb[0], pb[1]) > tol * tol)
+			return 0;
+	}
+	return 1;
+}
+
+/* Checks if the points of loop <loop> from index <a> to <b> (modulo the number
+ * of points) lie on an arc within <tol>. If so, the arc's center is set into
+ * <cx>,<cy> and its direction into <dir> (2 = clockwise, 3 = counter-clockwise)
+ * and non-zero is returned. The arc passes through both ends, so its center is
+ * on the chord's bisector. Its position there is the least squares solution of
+ * |p-c|^2 = |a-c|^2 for all points p, which is linear once relative to point
+ * <a>. The points must also turn monotonically around the center without
+ * completing a turn.
+ */
+int cut_fit_arc(const struct cut_loop *loop, int32_t a, int32_t b, float tol, float *cx, float *cy, uint8_t *dir)
+{
+	const float *pa = cut_pt(loop, a);
+	const float *pb = cut_pt(loop, b);
+	const float *pi;
+	double mx, my, nx, ny, len;
+	double qx, qy, sab, sbb;
+	double ccx, ccy, r, t;
+	double ang, prev, d, sweep;
+	int32_t i;
+
+	/* half chord and unit normal, relative to point a */
+	mx = (pb[0] - pa[0]) / 2;
+	my = (pb[1] - pa[1]) / 2;
+	len = 2 * hypot(mx, my);
+	if (len <= 0 || b - a < 2)
+		return 0;
+	nx = -2 * my / len;
+	ny = 2 * mx / len;
+
+	sab = sbb = 0;
+	for (i = a + 1; i < b; i++) {
+		pi = cut_pt(loop, i);
+		qx = pi[0] - pa[0];
+		qy = pi[1] - pa[1];
+		sab += (qx * qx + qy * qy - 2 * (mx * qx + my * qy)) * 2 * (nx * qx + ny * qy);
+		sbb += 4 * (nx * qx + ny * qy) * (nx * qx + ny * qy);
+	}
+
+	if (sbb <= 0)
+		return 0;
+
+	t = sab / sbb;
+	ccx = mx + t * nx;
+	ccy = my + t * ny;
+	r = hypot(ccx, ccy);
+	if (r <= 2 * tol)
+		return 0;
+
+	/* follow the angle of each point around the center */
+	prev = atan2(-ccy, -ccx);
+	sweep = 0;
+	for (i = a + 1; i <= b; i++) {
+		pi = cut_pt(loop, i);
+		qx = pi[0] - pa[0] - ccx;
+		qy = pi[1] - pa[1] - ccy;
+		if (i < b && fabs(hypot(qx, qy) - r) > tol)
+			return 0;
+
+		ang = atan2(qy, qx);
+		d = ang - prev;
+		if (d > M_PI)
+			d -= 2 * M_PI;
+		else if (d <= -M_PI)
+			d += 2 * M_PI;
+		prev = ang;
+
+		/* tolerate small steps backwards due to the noise */
+		if (sweep * d < 0 && fabs(d) > tol / r)
+			return 0;
+		sweep += d;
+	}
+
+	if (fabs(sweep) >= 2 * M_PI - 0.1)
+		return 0;
+
+	*cx = pa[0] + ccx;
+	*cy = pa[1] + ccy;
+	*dir = sweep > 0 ? 3 : 2;
+	return 1;
+}
+
+/* returns the farthest index b, from <a> + 1 to <end>, such that the points of
+ * loop <loop> from <a> to <b> fit a line (<arc> = 0) or an arc (<arc> != 0)
+ * within <tol>, or <a> if none does. Aligned points are considered as fitting
+ * an arc of infinite radius, so that an arc may start with a straight part.
+ * The fit is checked at exponentially growing distances, then the limit is
+ * refined by binary search. This assumes that a fitting range remains fitting
+ * when shortened, which is close enough to reality and keeps the cost at
+ * O(n.log(n)).
+ */
+int32_t cut_fit_reach(const struct cut_loop *loop, int32_t a, int32_t end, float tol, int arc)
+{
+	int32_t good, bad, step, b;
+	uint8_t dir;
+	float cx, cy;
+
+	good = arc ? a : a + 1;
+	bad = end + 1;
+	for (step = 2; ; step *= 2) {
+		b = a + step < end ? a + step : end;
+		if (b <= good)
+			break;
+		if (!cut_fit_line(loop, a, b, tol) &&
+		    (!arc || !cut_fit_arc(loop, a, b, tol, &cx, &cy, &dir))) {
+			bad = b;
+			break;
+		}
+		good = b;
+		if (b == end)
+			break;
+	}
+
+	while (bad - good > 1) {
+		b = (good + bad) / 2;
+		if (cut_fit_line(loop, a, b, tol) ||
+		    (arc && cut_fit_arc(loop, a, b, tol, &cx, &cy, &dir)))
+			good = b;
+		else
+			bad = b;
+	}
+	return good;
+}
+
+/* Replaces the points of closed loop <loop> with a series of straight segments
+ * and arcs, so that no original point is farther than <tol> from them. Starting
+ * from the first point, the longest line and the longest arc that fit the next
+ * points are searched, and the one reaching farthest is kept, the line being
+ * preferred on a tie. An arc is only kept if a line over the same points would
+ * deviate by more than twice <tol>, so that nearly straight parts never become
+ * arcs of huge radius. A line whose last few points are only accepted thanks
+ * to the tolerance ends before them, where they start to leave the line, so
+ * that straight parts remain exactly straight instead of being slightly tilted
+ * towards the next curve. This repeats from the end of each segment until the
+ * loop is closed. The first point is always kept. Returns non-zero on success,
+ * 0 on failure.
+ */
+int cut_fit(struct cut_loop *loop, float tol)
+{
+	int32_t n = loop->npts;
+	int32_t a, bl, ba, bt, m;
+	uint8_t *arc;
+	float *pts, *ctr;
+	float cx, cy;
+	uint8_t dir;
+
+	if (n < 4)
+		return 1;
+
+	pts = malloc(n * 2 * sizeof(*pts));
+	arc = malloc(n * sizeof(*arc));
+	ctr = malloc(n * 2 * sizeof(*ctr));
+	if (!pts || !arc || !ctr) {
+		free(pts);
+		free(arc);
+		free(ctr);
+		return 0;
+	}
+
+	for (a = m = 0; a < n; m++) {
+		bl = cut_fit_reach(loop, a, n, tol, 0);
+		ba = cut_fit_reach(loop, a, n, tol, 1);
+
+		pts[2 * m] = loop->pts[2 * a];
+		pts[2 * m + 1] = loop->pts[2 * a + 1];
+		arc[m] = 0;
+		ctr[2 * m] = ctr[2 * m + 1] = 0;
+		if (ba > bl && !cut_fit_line(loop, a, ba, 2 * tol) &&
+		    cut_fit_arc(loop, a, ba, tol, &cx, &cy, &dir)) {
+			arc[m] = dir;
+			ctr[2 * m] = cx;
+			ctr[2 * m + 1] = cy;
+			a = ba;
+		}
+		else {
+			bt = cut_fit_reach(loop, a, bl, tol / 8, 0);
+			a = bl - bt <= CUT_LINE_TRIM ? bt : bl;
+		}
+	}
+
+	free(loop->pts);
+	free(loop->arc);
+	free(loop->ctr);
+	loop->pts = pts;
+	loop->arc = arc;
+	loop->ctr = ctr;
+	loop->npts = m;
+	loop->alloc = n;
+	return 1;
+}
+
 /* Computes the cut line around the artwork of image <img> according to the
  * <cutting> settings, and returns it in <loops> as a list of closed loops with
  * image-relative coordinates in millimeters. The list is empty when there is
@@ -2350,13 +2610,14 @@ int cut_trace(struct cut_grid *grid, struct cut_loop **loops)
  *   - join the separate parts with bridges;
  *   - round the area with a ball of the smoothing radius;
  *   - fill the holes so that only outer boundaries remain;
- *   - trace these boundaries.
+ *   - trace these boundaries and simplify them.
  * Returns non-zero on success, 0 on failure.
  */
 int cut_compute(const struct image *img, struct cut_loop **loops)
 {
 	struct cut_grid grid;
-	float res, pad, smooth, bridge;
+	struct cut_loop *loop;
+	float res, pad, smooth, bridge, tol;
 	float margin, area;
 	int32_t cells, p;
 	int ret = 0;
@@ -2372,6 +2633,7 @@ int cut_compute(const struct image *img, struct cut_loop **loops)
 		if (area / (res * res) > CUT_MAX_CELLS)
 			res = sqrt(area / CUT_MAX_CELLS);
 	}
+	tol = cutting.tol >= 0 ? cutting.tol : res / 2;
 
 	/* the closing must not reach the grid's border */
 	pad = cutting.margin + smooth + 2 * res;
@@ -2401,6 +2663,13 @@ int cut_compute(const struct image *img, struct cut_loop **loops)
 
 	if (!cut_trace(&grid, loops))
 		goto out;
+
+	for (loop = *loops; loop; loop = loop->next) {
+		if (!cut_smooth_loop(loop, 2))
+			goto out;
+		if (!cut_fit(loop, tol))
+			goto out;
+	}
 	ret = 1;
  out:
 	if (!ret) {
@@ -3301,6 +3570,10 @@ int main(int argc, char **argv)
 
 		case OPT_CUT_RES:
 			cutting.res = arg_f;
+			break;
+
+		case OPT_CUT_TOL:
+			cutting.tol = arg_f;
 			break;
 
 		case OPT_MAP: {  /* [from_min:from_max:]to_min:to_max[:gamma2] */
