@@ -21,6 +21,11 @@
 /* max number of arguments for a transformation */
 #define MAX_XFRM_ARGS 10
 
+/* max number of output levels of a dithering transformation, which stores its
+ * algorithm and its number of levels before them.
+ */
+#define MAX_DITHER_LEVELS (MAX_XFRM_ARGS - 2)
+
 /* 5x7 fonts give 6x9 as we keep one pixel around on X and 2 on Y */
 #define TEXT_HEIGHT 7
 #define TEXT_WIDTH 5
@@ -117,6 +122,7 @@ enum opt {
 	OPT_CUT_HOLD_LEN,
 	OPT_CUT_INNER,
 	OPT_CUT_BASE,
+	OPT_DITHER,
 };
 
 const struct option long_options[] = {
@@ -188,6 +194,7 @@ const struct option long_options[] = {
 	{"cut-hold-len", required_argument, 0, OPT_CUT_HOLD_LEN },
 	{"cut-inner",   required_argument, 0, OPT_CUT_INNER    },
 	{"cut-base",    required_argument, 0, OPT_CUT_BASE     },
+	{"dither",      required_argument, 0, OPT_DITHER       },
 	{0,             0,                 0, 0                }
 };
 
@@ -210,6 +217,37 @@ enum xfrm_op {
 	XFRM_OFST,      // args: 0=value
 	XFRM_ZERO,      // args: none
 	XFRM_TEXT,      // args: 0=xalign(-1,0,1) 1=yalign, 2=#lines, 3=zoom, 4=fgalpha, 5=fgcol, 6=bgalpha, 7=bgcol
+	XFRM_DITHER,    // args: 0=algo, 1=#levels, 2...=levels' lightness
+};
+
+/* error diffusion algorithms used for dithering */
+enum dither_algo {
+	DITHER_FS = 0,  // Floyd-Steinberg
+	DITHER_ALGOS    // must be last one
+};
+
+/* share of the error diffused to the pixel at (dx,dy) from the current one,
+ * for pixels processed from left to right. A zero weight ends the list.
+ */
+struct dither_cell {
+	int dx, dy;
+	float w;
+};
+
+const struct dither_cell dither_fs[] = {
+	{  1, 0, 7.0 / 16 },
+	{ -1, 1, 3.0 / 16 },
+	{  0, 1, 5.0 / 16 },
+	{  1, 1, 1.0 / 16 },
+	{  0, 0, 0        },
+};
+
+const struct dither_cell *dither_cells[DITHER_ALGOS] = {
+	[DITHER_FS] = dither_fs,
+};
+
+const char *dither_names[DITHER_ALGOS] = {
+	[DITHER_FS] = "fs",
 };
 
 struct xfrm {
@@ -470,6 +508,7 @@ void usage(int code, const char *cmd)
 	    "     --soften <value>          subtract neighbors' average times <value>\n"
 	    "     --map <args[2..5]>        map values [from_min:from_max:]to_min:to_max[:gamma2]\n"
 	    "     --max-length <pixels>     limit long series for use with FS dithering (def: 0)\n"
+	    "     --dither <algo>           dither to black and white (fs)\n"
 	    "     --text-fg-value <value>   set FG value for future text (def: 1.0)\n"
 	    "     --text-fg-alpha <value>   set FG alpha for future text (def: 1.0)\n"
 	    "     --text-bg-value <value>   set BG value for future text (def: 0.0)\n"
@@ -1354,6 +1393,52 @@ void measure_text_size(struct xfrm *xfrm, int *width, int *height)
 	*width = l_w + c_w + r_w;
 	*height = b_h + c_h + t_h;
 }
+
+/* Dithers the work area of image <img> to the levels of transformation <xfrm>
+ * by error diffusion. The levels are lightness values (0 = black, 1 = white)
+ * which are considered as evenly spaced shades from black to white, so that
+ * values found to produce distinct shades can be used as-is. Each pixel's
+ * lightness, including the errors received from previous ones, is rounded to
+ * the closest shade, the pixel takes the corresponding level, and the
+ * difference is spread to the next pixels. Rows are processed alternately in
+ * both directions so that errors are not always pushed the same way, which
+ * would create diagonal patterns in flat areas. The work area holds darkness,
+ * hence the conversions.
+ */
+void xfrm_dither(struct image *img, const struct xfrm *xfrm)
+{
+	const struct dither_cell *cell = dither_cells[(int)xfrm->args[0]];
+	const struct dither_cell *c;
+	int nb = xfrm->args[1];
+	const float *levels = xfrm->args + 2;
+	int32_t x, y, x2, y2, dir;
+	float v, err;
+	int i;
+
+	for (y = 0; y < img->h; y++) {
+		dir = (y & 1) ? -1 : 1;
+		for (x = (y & 1) ? img->w - 1 : 0; x >= 0 && x < img->w; x += dir) {
+			v = 1.0 - img->work[y * img->w + x];
+			i = nearbyint(v * (nb - 1));
+			if (i < 0)
+				i = 0;
+			else if (i > nb - 1)
+				i = nb - 1;
+
+			err = v - (float)i / (nb - 1);
+			img->work[y * img->w + x] = 1.0 - levels[i];
+
+			for (c = cell; c->w; c++) {
+				x2 = x + c->dx * dir;
+				y2 = y + c->dy;
+				if (x2 < 0 || x2 >= img->w || y2 >= img->h)
+					continue;
+				img->work[y2 * img->w + x2] -= err * c->w;
+			}
+		}
+	}
+}
+
 /* apply transformations starting at <xfrm> to image <img>. Return non-zero on
  * success, zero on failure.
  */
@@ -1715,6 +1800,9 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 				}
 			}
 		}
+
+		if (xfrm->op == XFRM_DITHER)
+			xfrm_dither(img, xfrm);
 
 		free(soften);
 		soften = NULL;
@@ -4152,6 +4240,29 @@ int main(int argc, char **argv)
 				die(1, "map <%s>: from_min must be lower than from_max\n", optarg);
 
 			curr = xfrm_new(curr, XFRM_MAP, 5, args);
+			if (!curr)
+				die(1, "failed to allocate a new transformation\n");
+			if (!xfrm)
+				xfrm = curr;
+			break;
+		}
+
+		case OPT_DITHER: {  /* <algo> */
+			float args[4];
+			int algo;
+
+			for (algo = 0; algo < DITHER_ALGOS; algo++)
+				if (strcmp(optarg, dither_names[algo]) == 0)
+					break;
+			if (algo == DITHER_ALGOS)
+				die(1, "unknown dithering algorithm <%s>\n", optarg);
+
+			/* black and white */
+			args[0] = algo;
+			args[1] = 2;
+			args[2] = 0.0;
+			args[3] = 1.0;
+			curr = xfrm_new(curr, XFRM_DITHER, 4, args);
 			if (!curr)
 				die(1, "failed to allocate a new transformation\n");
 			if (!xfrm)
