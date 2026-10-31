@@ -570,6 +570,56 @@ int write_gray_file(const char *file, struct image *img)
 	return ret;
 }
 
+/* write the rgba buffer from <img> into file <file>, or to stdout if <file> is
+ * NULL, using the same bottom to top direction as write_gray_file(). Returns
+ * non-zero on success, otherwise zero.
+ */
+int write_rgba_file(const char *file, struct image *img)
+{
+	const int row_stride = -1; // bottom to top
+	png_image png_image;
+	int ret;
+
+	memset(&png_image, 0, sizeof(png_image));
+	png_image.version = PNG_IMAGE_VERSION;
+	png_image.width   = img->w;
+	png_image.height  = img->h;
+	png_image.format  = PNG_FORMAT_RGBA;
+
+	if (file)
+		ret = png_image_write_to_file(&png_image, file, 0, img->rgba, row_stride * PNG_IMAGE_ROW_STRIDE(png_image), NULL);
+	else
+		ret = png_image_write_to_stdio(&png_image, stdout, 0, img->rgba, row_stride * PNG_IMAGE_ROW_STRIDE(png_image), NULL);
+	return ret;
+}
+
+/* convert image <img> from gray to opaque rgba. The rgba buffer will be
+ * allocated and the gray buffer will be freed. Non-zero is returned on
+ * success, zero on error.
+ */
+int gray_to_rgba(struct image *img)
+{
+	int32_t p;
+
+	if (!img->gray)
+		return 0;
+
+	img->rgba = malloc(img->w * img->h * 4);
+	if (!img->rgba)
+		return 0;
+
+	for (p = 0; p < img->w * img->h; p++) {
+		img->rgba[p * 4 + 0] = img->gray[p];
+		img->rgba[p * 4 + 1] = img->gray[p];
+		img->rgba[p * 4 + 2] = img->gray[p];
+		img->rgba[p * 4 + 3] = 255;
+	}
+
+	free(img->gray);
+	img->gray = NULL;
+	return 1;
+}
+
 /* convert image <img> from rgba to gray. Transparent is turned to white. The
  * gray buffer will be allocated and the rgba buffer will be freed. Non-zero is
  * returned on success, zero on error.
@@ -3495,7 +3545,9 @@ int main(int argc, char **argv)
 		if (!work_to_gray(&img, arg_raw_preview))
 			die(3, "failed to convert image to gray\n");
 
-		if (!write_gray_file(out, &img))
+		if (img.rgba && !write_rgba_file(out, &img))
+			die(5, "failed to write file %s\n", out);
+		else if (!img.rgba && !write_gray_file(out, &img))
 			die(5, "failed to write file %s\n", out);
 	}
 	else if (fmt == OUT_FMT_GCODE) {
