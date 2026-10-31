@@ -2257,6 +2257,37 @@ void cut_loops_extent(const struct cut_loop *loops, float *minx, float *maxx, fl
 	}
 }
 
+/* rotates the points of loop <loop> so that it starts at its bottom-most
+ * point, or the leftmost one if there are several, which eases the alignment
+ * of the machine on the cut. Returns non-zero on success, 0 on failure.
+ */
+int cut_loop_set_start(struct cut_loop *loop)
+{
+	int32_t start, i;
+	float *pts;
+
+	start = 0;
+	for (i = 1; i < loop->npts; i++) {
+		if (loop->pts[2 * i + 1] < loop->pts[2 * start + 1] ||
+		    (loop->pts[2 * i + 1] == loop->pts[2 * start + 1] &&
+		     loop->pts[2 * i] < loop->pts[2 * start]))
+			start = i;
+	}
+
+	if (!start)
+		return 1;
+
+	pts = malloc(loop->alloc * 2 * sizeof(*pts));
+	if (!pts)
+		return 0;
+
+	memcpy(pts, loop->pts + 2 * start, (loop->npts - start) * 2 * sizeof(*pts));
+	memcpy(pts + 2 * (loop->npts - start), loop->pts, start * 2 * sizeof(*pts));
+	free(loop->pts);
+	loop->pts = pts;
+	return 1;
+}
+
 /* returns non-zero if cell (<x>,<y>) of grid <grid> has CUT_KEEP. Cells outside
  * of the grid don't have it.
  */
@@ -2610,7 +2641,8 @@ int cut_fit(struct cut_loop *loop, float tol)
  *   - join the separate parts with bridges;
  *   - round the area with a ball of the smoothing radius;
  *   - fill the holes so that only outer boundaries remain;
- *   - trace these boundaries and simplify them.
+ *   - trace these boundaries, smooth them, make them start at their
+ *     bottom-left point and simplify them.
  * Returns non-zero on success, 0 on failure.
  */
 int cut_compute(const struct image *img, struct cut_loop **loops)
@@ -2666,6 +2698,8 @@ int cut_compute(const struct image *img, struct cut_loop **loops)
 
 	for (loop = *loops; loop; loop = loop->next) {
 		if (!cut_smooth_loop(loop, 2))
+			goto out;
+		if (!cut_loop_set_start(loop))
 			goto out;
 		if (!cut_fit(loop, tol))
 			goto out;
