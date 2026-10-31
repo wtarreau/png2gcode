@@ -1558,6 +1558,7 @@ struct pass *pass_new(struct pass *last)
 	new->feed    = -1;
 	new->spindle = -1;
 	new->passes  = 1;
+	new->next    = NULL;
 	if (last)
 		last->next = new;
 	return new;
