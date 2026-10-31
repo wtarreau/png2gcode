@@ -32,6 +32,7 @@
 #define CUT_KEEP     0x02 // the cell belongs to the piece to cut
 #define CUT_OUTSIDE  0x04 // the cell is reachable from the grid's border
 #define CUT_SEEN     0x08 // the boundary between this cell and its right one was traced
+#define CUT_HOLE     0x10 // the cell is in a hole of the piece, which may be cut out
 
 /* squared distance of cells that are not reachable from any feature cell */
 #define CUT_INF 1e20
@@ -114,6 +115,7 @@ enum opt {
 	OPT_CUT_TAB,
 	OPT_CUT_HOLDS,
 	OPT_CUT_HOLD_LEN,
+	OPT_CUT_INNER,
 };
 
 const struct option long_options[] = {
@@ -183,6 +185,7 @@ const struct option long_options[] = {
 	{"cut-tab",     required_argument, 0, OPT_CUT_TAB      },
 	{"cut-holds",   required_argument, 0, OPT_CUT_HOLDS    },
 	{"cut-hold-len", required_argument, 0, OPT_CUT_HOLD_LEN },
+	{"cut-inner",   required_argument, 0, OPT_CUT_INNER    },
 	{0,             0,                 0, 0                }
 };
 
@@ -305,6 +308,7 @@ struct cutting {
 	float tab;       // diameter of the tab around the hanging hole in mm, <0 = auto
 	int holds;       // number of holding tabs left uncut along each piece
 	float hold_len;  // length of each holding tab in mm
+	float inner;     // min diameter of a disc fitting in the inner holes to cut in mm, 0 = none
 } cutting = {
 	.margin    = 2.0,
 	.smooth    = -1,
@@ -316,6 +320,7 @@ struct cutting {
 	.tab       = -1,
 	.holds     = 0,
 	.hold_len  = 0.5,
+	.inner     = 0,
 };
 
 /* Grid used to compute the cut line. Cells are squares of <res> millimeters.
@@ -483,6 +488,7 @@ void usage(int code, const char *cmd)
 	    "     --cut-tab <mm>            diameter of the tab around the hole (def: hole+2*margin)\n"
 	    "     --cut-holds <count>       holding tabs left uncut around each piece (def: 0)\n"
 	    "     --cut-hold-len <mm>       length of each holding tab (def: 0.5)\n"
+	    "     --cut-inner <mm>          cut inner holes fitting a disc this size, 0=none (def: 0)\n"
 	    "Material characteristics:\n"
 	    "  -d --diffuse <ratio>         adjacent radiation for hash & soften (def:0.18)\n"
 	    "Machine settings:\n"
@@ -2141,8 +2147,9 @@ int cut_close(struct cut_grid *grid, float radius)
 /* Sets CUT_OUTSIDE on all cells of grid <grid> without CUT_KEEP that can be
  * reached from the bottom left cell through other such cells using
  * 4-connectivity, then sets CUT_KEEP on all cells not having CUT_OUTSIDE, so
- * that holes in the piece are filled. The bottom left cell must not have
- * CUT_KEEP. Returns non-zero on success, 0 on failure.
+ * that holes in the piece are filled. The cells of these holes also get
+ * CUT_HOLE. The bottom left cell must not have CUT_KEEP. Returns non-zero on
+ * success, 0 on failure.
  */
 int cut_fill_outside(struct cut_grid *grid)
 {
@@ -2170,9 +2177,13 @@ int cut_fill_outside(struct cut_grid *grid)
 	}
 	free(stack);
 
-	for (p = 0; p < cells; p++)
-		if (!(grid->map[p] & CUT_OUTSIDE))
-			grid->map[p] |= CUT_KEEP;
+	for (p = 0; p < cells; p++) {
+		if (grid->map[p] & CUT_OUTSIDE)
+			continue;
+		if (!(grid->map[p] & CUT_KEEP))
+			grid->map[p] |= CUT_HOLE;
+		grid->map[p] |= CUT_KEEP;
+	}
 	return 1;
 }
 
@@ -2766,8 +2777,8 @@ int cut_add_holds(struct cut_loop *loop, int count, float len)
  *   - join the separate parts with bridges;
  *   - round the area with a ball of the smoothing radius;
  *   - fill the holes so that only outer boundaries remain.
- * Any previous CUT_KEEP and CUT_OUTSIDE flags are cleared first. Returns
- * non-zero on success, 0 on failure.
+ * Any previous CUT_KEEP, CUT_OUTSIDE and CUT_HOLE flags are cleared first.
+ * Returns non-zero on success, 0 on failure.
  */
 int cut_shape(struct cut_grid *grid, float margin, float bridge, float smooth)
 {
@@ -2775,7 +2786,7 @@ int cut_shape(struct cut_grid *grid, float margin, float bridge, float smooth)
 	int32_t p;
 
 	for (p = 0; p < cells; p++) {
-		grid->map[p] &= ~(CUT_KEEP | CUT_OUTSIDE);
+		grid->map[p] &= ~(CUT_KEEP | CUT_OUTSIDE | CUT_HOLE);
 		grid->dist[p] = (grid->map[p] & CUT_ARTWORK) ? 0 : CUT_INF;
 	}
 
@@ -2795,11 +2806,74 @@ int cut_shape(struct cut_grid *grid, float margin, float bridge, float smooth)
 	return cut_fill_outside(grid);
 }
 
+/* Only keeps the CUT_HOLE flag on the holes of grid <grid> that may contain a
+ * disc of <radius> cells, which are the ones to cut out. Holes are 4-connected
+ * areas, like the outside, and the largest disc they contain is given by the
+ * largest distance between their cells and the cells around them. Returns
+ * non-zero on success, 0 on failure.
+ */
+int cut_select_holes(struct cut_grid *grid, float radius)
+{
+	int32_t cells = grid->w * grid->h;
+	int32_t *stack;
+	int32_t p, q, sp, top, n;
+	int32_t nb[4];
+	float dmax;
+
+	for (p = 0; p < cells; p++)
+		grid->dist[p] = (grid->map[p] & CUT_HOLE) ? CUT_INF : 0;
+
+	if (!cut_edt(grid))
+		return 0;
+
+	stack = malloc(cells * sizeof(*stack));
+	if (!stack)
+		return 0;
+
+	/* CUT_OUTSIDE is never set on the kept cells, which include the holes,
+	 * so it marks the visited hole cells here, and is cleared at the end.
+	 */
+	for (p = 0; p < cells; p++) {
+		if ((grid->map[p] & (CUT_HOLE | CUT_OUTSIDE)) != CUT_HOLE)
+			continue;
+
+		/* the stack keeps all the hole's cells below <top> */
+		sp = top = 0;
+		grid->map[p] |= CUT_OUTSIDE;
+		stack[top++] = p;
+		dmax = 0;
+		while (sp < top) {
+			q = stack[sp++];
+			dmax = fmax(dmax, grid->dist[q]);
+			cut_neighbours(grid, q, nb);
+			for (n = 0; n < 4; n++) {
+				if (nb[n] < 0 || (grid->map[nb[n]] & (CUT_HOLE | CUT_OUTSIDE)) != CUT_HOLE)
+					continue;
+				grid->map[nb[n]] |= CUT_OUTSIDE;
+				stack[top++] = nb[n];
+			}
+		}
+
+		if (dmax >= radius * radius)
+			continue;
+		for (sp = 0; sp < top; sp++)
+			grid->map[stack[sp]] &= ~CUT_HOLE;
+	}
+
+	for (p = 0; p < cells; p++)
+		if (grid->map[p] & CUT_KEEP)
+			grid->map[p] &= ~CUT_OUTSIDE;
+
+	free(stack);
+	return 1;
+}
+
 /* Places a hanging tab on top of the artwork of grid <grid>, and adds it as a
  * disc of <radius> cells to the CUT_ARTWORK cells so that the margin, bridges
  * and rounding are applied around it. A hanging piece rotates until its center
  * of mass is right below the hole, so the tab is horizontally centered on the
- * centroid of the CUT_KEEP area (the piece including its margin). It is placed
+ * centroid of the CUT_KEEP area (the piece including its margin) excluding the
+ * CUT_HOLE cells which are cut out. It is placed
  * <clear> cells above the topmost artwork cell, so that the piece always hangs
  * the right way up. When the artwork right below is lower, the tab is attached
  * by the bridges. The tab's center is returned in cells in <cx> and <cy>, or -1
@@ -2815,7 +2889,7 @@ int cut_add_tab(struct cut_grid *grid, float radius, float clear, int32_t *cx, i
 	sumx = 0;
 	n = 0;
 	for (p = 0; p < cells; p++) {
-		if (!(grid->map[p] & CUT_KEEP))
+		if ((grid->map[p] & (CUT_KEEP | CUT_HOLE)) != CUT_KEEP)
 			continue;
 		sumx += p % grid->w;
 		n++;
@@ -2869,19 +2943,23 @@ int cut_add_circle(struct cut_loop **loops, float x, float y, float radius)
  * <cutting> settings, and returns it in <loops> as a list of closed loops with
  * image-relative coordinates in millimeters. The list is empty when there is
  * no artwork, and contains one loop per separate piece, preceded by the
- * hanging hole if any, since inner cuts must be made before the piece is
- * detached. The steps are:
+ * hanging hole and the inner holes if any, since inner cuts must be made
+ * before the piece is detached. The steps are:
  *   - mark the cells covering the artwork on a grid larger than the image;
  *   - compute the piece around it (see cut_shape());
  *   - if a hanging hole is requested, add the tab to the artwork on top of the
  *     piece and compute the piece again;
+ *   - if inner holes are requested, keep the large enough ones (see
+ *     cut_select_holes());
  *   - trace the piece's boundaries, smooth them, make them start at their
- *     bottom-left point, simplify them and leave the holding tabs uncut.
+ *     bottom-left point, simplify them and leave the holding tabs uncut;
+ *   - trace the inner holes' boundaries and simplify them the same way.
  * Returns non-zero on success, 0 on failure.
  */
 int cut_compute(const struct image *img, struct cut_loop **loops)
 {
 	struct cut_grid grid;
+	struct cut_loop *holes = NULL;
 	struct cut_loop *loop;
 	float res, pad, smooth, bridge, tol;
 	float area, tab, clear, margin;
@@ -2928,12 +3006,18 @@ int cut_compute(const struct image *img, struct cut_loop **loops)
 	if (!cut_shape(&grid, margin / res, bridge / res, smooth / res))
 		goto out;
 
+	if (cutting.inner > 0 && !cut_select_holes(&grid, cutting.inner / 2 / res))
+		goto out;
+
 	cx = -1;
 	if (cutting.hole > 0) {
 		if (!cut_add_tab(&grid, tab / 2 / res, clear / res, &cx, &cy))
 			goto out;
 
 		if (cx >= 0 && !cut_shape(&grid, margin / res, bridge / res, smooth / res))
+			goto out;
+
+		if (cx >= 0 && cutting.inner > 0 && !cut_select_holes(&grid, cutting.inner / 2 / res))
 			goto out;
 	}
 
@@ -2951,6 +3035,29 @@ int cut_compute(const struct image *img, struct cut_loop **loops)
 			goto out;
 	}
 
+	if (cutting.inner > 0) {
+		if (!cut_trace(&grid, CUT_HOLE, &holes))
+			goto out;
+
+		for (loop = holes; loop; loop = loop->next) {
+			if (!cut_smooth_loop(loop, 2))
+				goto out;
+			if (!cut_loop_set_start(loop))
+				goto out;
+			if (!cut_fit(loop, tol))
+				goto out;
+			if (!loop->next)
+				break;
+		}
+
+		/* inner holes are cut before the pieces */
+		if (holes) {
+			loop->next = *loops;
+			*loops = holes;
+			holes = NULL;
+		}
+	}
+
 	if (cx >= 0 &&
 	    !cut_add_circle(loops,
 			    grid.x0 + (cx + 0.5) * res,
@@ -2963,6 +3070,7 @@ int cut_compute(const struct image *img, struct cut_loop **loops)
 		cut_loops_free(*loops);
 		*loops = NULL;
 	}
+	cut_loops_free(holes);
 	cut_grid_free(&grid);
 	return ret;
 }
@@ -3889,6 +3997,10 @@ int main(int argc, char **argv)
 
 		case OPT_CUT_HOLD_LEN:
 			cutting.hold_len = arg_f;
+			break;
+
+		case OPT_CUT_INNER:
+			cutting.inner = arg_f;
 			break;
 
 		case OPT_MAP: {  /* [from_min:from_max:]to_min:to_max[:gamma2] */
