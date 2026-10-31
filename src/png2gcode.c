@@ -101,6 +101,7 @@ enum opt {
 	OPT_UBW,
 	OPT_CUT_MARGIN,
 	OPT_CUT_SMOOTH,
+	OPT_CUT_BRIDGE,
 	OPT_CUT_THRESHOLD,
 	OPT_CUT_RES,
 };
@@ -164,6 +165,7 @@ const struct option long_options[] = {
 	{"raster-ubw",  no_argument,       0, OPT_UBW          },
 	{"cut-margin",  required_argument, 0, OPT_CUT_MARGIN   },
 	{"cut-smooth",  required_argument, 0, OPT_CUT_SMOOTH   },
+	{"cut-bridge",  required_argument, 0, OPT_CUT_BRIDGE   },
 	{"cut-threshold", required_argument, 0, OPT_CUT_THRESHOLD },
 	{"cut-res",     required_argument, 0, OPT_CUT_RES      },
 	{0,             0,                 0, 0                }
@@ -280,11 +282,13 @@ int raster_ubw = 0;
 struct cutting {
 	float margin;    // min distance between the artwork and the cut line in mm
 	float smooth;    // rounding radius in mm, <0 = same as margin
+	float bridge;    // width of the bridges joining separate parts in mm, 0 = none, <0 = auto
 	float threshold; // pixels above this work value are artwork
 	float res;       // cut grid cell size in mm, <=0 = auto
 } cutting = {
 	.margin    = 2.0,
 	.smooth    = -1,
+	.bridge    = -1,
 	.threshold = 0,
 	.res       = 0,
 };
@@ -312,6 +316,15 @@ struct cut_loop {
 	int32_t alloc;         // number of allocated points
 	float *pts;            // <npts> (x,y) pairs
 	struct cut_loop *next; // next loop or NULL
+};
+
+/* shortest link between two separate parts of a cut grid: cells <p1> and <p2>
+ * of parts <part1> and <part2> are <sqdist> squared cells apart.
+ */
+struct cut_link {
+	float sqdist;
+	int32_t part1, part2;
+	int32_t p1, p2;
 };
 
 
@@ -432,6 +445,7 @@ void usage(int code, const char *cmd)
 	    "Cut line settings (-M cut):\n"
 	    "     --cut-margin <mm>         min distance from the artwork to the cut line (def: 2.0)\n"
 	    "     --cut-smooth <mm>         rounding radius, fills gaps below twice it (def: margin)\n"
+	    "     --cut-bridge <mm>         width of bridges joining parts, 0=none (def: max(3,2*margin))\n"
 	    "     --cut-threshold <value>   pixels above this intensity are artwork (def: 0.0)\n"
 	    "     --cut-res <mm>            cut computation resolution (def: min(pixel size,0.1))\n"
 	    "Material characteristics:\n"
@@ -1771,6 +1785,238 @@ void cut_neighbours(const struct cut_grid *grid, int32_t p, int32_t *nb)
 	nb[3] = y < grid->h - 1 ? p + grid->w : -1;
 }
 
+/* returns the squared distance between point (<px>,<py>) and the segment
+ * going from (<ax>,<ay>) to (<bx>,<by>).
+ */
+float seg_sqdist(float px, float py, float ax, float ay, float bx, float by)
+{
+	float dx = bx - ax;
+	float dy = by - ay;
+	float len = dx * dx + dy * dy;
+	float t = 0;
+
+	if (len > 0) {
+		t = ((px - ax) * dx + (py - ay) * dy) / len;
+		if (t < 0)
+			t = 0;
+		else if (t > 1)
+			t = 1;
+	}
+	dx = ax + t * dx - px;
+	dy = ay + t * dy - py;
+	return dx * dx + dy * dy;
+}
+
+/* sets CUT_KEEP on all cells of grid <grid> whose center is within <radius>
+ * cells of the segment joining the centers of cells <p1> and <p2>.
+ */
+void cut_paint_segment(struct cut_grid *grid, int32_t p1, int32_t p2, float radius)
+{
+	int32_t x1 = p1 % grid->w, y1 = p1 / grid->w;
+	int32_t x2 = p2 % grid->w, y2 = p2 / grid->w;
+	int32_t xmin, xmax, ymin, ymax;
+	int32_t x, y;
+
+	xmin = floor((x1 < x2 ? x1 : x2) - radius);
+	xmax = ceil((x1 > x2 ? x1 : x2) + radius);
+	ymin = floor((y1 < y2 ? y1 : y2) - radius);
+	ymax = ceil((y1 > y2 ? y1 : y2) + radius);
+
+	if (xmin < 0)
+		xmin = 0;
+	if (xmax > grid->w - 1)
+		xmax = grid->w - 1;
+	if (ymin < 0)
+		ymin = 0;
+	if (ymax > grid->h - 1)
+		ymax = grid->h - 1;
+
+	for (y = ymin; y <= ymax; y++)
+		for (x = xmin; x <= xmax; x++)
+			if (seg_sqdist(x, y, x1, y1, x2, y2) <= radius * radius)
+				grid->map[y * grid->w + x] |= CUT_KEEP;
+}
+
+/* compares two cut links by distance, for qsort() */
+int cut_link_cmp(const void *a, const void *b)
+{
+	const struct cut_link *la = a;
+	const struct cut_link *lb = b;
+
+	return la->sqdist < lb->sqdist ? -1 : la->sqdist > lb->sqdist;
+}
+
+/* returns the root of part <part> in union-find array <root> */
+int32_t cut_part_root(int32_t *root, int32_t part)
+{
+	while (root[part] != part) {
+		root[part] = root[root[part]];
+		part = root[part];
+	}
+	return part;
+}
+
+/* Joins the separate parts of the CUT_KEEP area of grid <grid> with bridges
+ * of <width> cells so that they form a single piece. Parts are the 4-connected
+ * areas, so that two parts only touching by a corner are bridged as well. The
+ * bridges follow the minimum spanning tree of the parts, where the cost of a
+ * link between two parts is the shortest distance between their boundaries:
+ * this joins N parts with N-1 bridges, always the shortest ones possible. The
+ * closest boundary cells of each pair of parts are found by brute force, which
+ * is fine for the few parts usually met. The tree is built using Kruskal's
+ * algorithm: links are considered from the shortest to the longest one, and a
+ * link is kept when it joins parts that were not joined yet. Returns non-zero
+ * on success, 0 on failure.
+ */
+int cut_bridge(struct cut_grid *grid, float width)
+{
+	int32_t cells = grid->w * grid->h;
+	int32_t *part = NULL;     // part of each cell or -1
+	int32_t *stack = NULL;    // cells to visit while labelling
+	int32_t *bstart = NULL;   // index of each part's first entry in <bcell>
+	int32_t *bcell = NULL;    // boundary cells sorted by part
+	int32_t *root = NULL;     // union-find of the parts
+	struct cut_link *links = NULL;
+	struct cut_link link;
+	int32_t nparts, nlinks, nb[4];
+	int32_t p, q, i, j, a, b, n;
+	int32_t sp, bnd;
+	float dx, dy, d;
+	int ret = 0;
+
+	part  = malloc(cells * sizeof(*part));
+	stack = malloc(cells * sizeof(*stack));
+	if (!part || !stack)
+		goto out;
+
+	/* label the parts and count their boundary cells */
+	nparts = 0;
+	bnd = 0;
+	for (p = 0; p < cells; p++)
+		part[p] = -1;
+
+	for (p = 0; p < cells; p++) {
+		if (!(grid->map[p] & CUT_KEEP) || part[p] >= 0)
+			continue;
+
+		sp = 0;
+		part[p] = nparts;
+		stack[sp++] = p;
+		while (sp) {
+			q = stack[--sp];
+			cut_neighbours(grid, q, nb);
+			for (n = 0; n < 4; n++) {
+				if (nb[n] < 0 || !(grid->map[nb[n]] & CUT_KEEP)) {
+					bnd++;
+					continue;
+				}
+				if (part[nb[n]] >= 0)
+					continue;
+				part[nb[n]] = nparts;
+				stack[sp++] = nb[n];
+			}
+		}
+		nparts++;
+	}
+
+	if (nparts < 2) {
+		ret = 1;
+		goto out;
+	}
+
+	/* list the boundary cells of each part, i.e. the ones having at
+	 * least one neighbour outside of the part. <bnd> above may count
+	 * a cell multiple times, so it's only an upper bound.
+	 */
+	bstart = calloc(nparts + 1, sizeof(*bstart));
+	bcell  = malloc(bnd * sizeof(*bcell));
+	root   = malloc(nparts * sizeof(*root));
+	links  = malloc((size_t)nparts * (nparts - 1) / 2 * sizeof(*links));
+	if (!bstart || !bcell || !root || !links)
+		goto out;
+
+	for (p = 0; p < cells; p++) {
+		if (part[p] < 0)
+			continue;
+		cut_neighbours(grid, p, nb);
+		for (n = 0; n < 4; n++) {
+			if (nb[n] < 0 || part[nb[n]] < 0) {
+				bstart[part[p] + 1]++;
+				break;
+			}
+		}
+	}
+
+	for (i = 0; i < nparts; i++)
+		bstart[i + 1] += bstart[i];
+
+	/* root[] temporarily serves as the fill index of each part */
+	for (i = 0; i < nparts; i++)
+		root[i] = bstart[i];
+
+	for (p = 0; p < cells; p++) {
+		if (part[p] < 0)
+			continue;
+		cut_neighbours(grid, p, nb);
+		for (n = 0; n < 4; n++) {
+			if (nb[n] < 0 || part[nb[n]] < 0) {
+				bcell[root[part[p]]++] = p;
+				break;
+			}
+		}
+	}
+
+	/* find the shortest link between each pair of parts */
+	nlinks = 0;
+	for (i = 0; i < nparts; i++) {
+		for (j = i + 1; j < nparts; j++) {
+			link.sqdist = CUT_INF;
+			link.part1 = i;
+			link.part2 = j;
+			link.p1 = link.p2 = -1;
+			for (a = bstart[i]; a < bstart[i + 1]; a++) {
+				for (b = bstart[j]; b < bstart[j + 1]; b++) {
+					dx = bcell[a] % grid->w - bcell[b] % grid->w;
+					dx *= dx;
+					if (dx >= link.sqdist)
+						continue;
+					dy = bcell[a] / grid->w - bcell[b] / grid->w;
+					d = dx + dy * dy;
+					if (d < link.sqdist) {
+						link.sqdist = d;
+						link.p1 = bcell[a];
+						link.p2 = bcell[b];
+					}
+				}
+			}
+			links[nlinks++] = link;
+		}
+	}
+
+	/* build the minimum spanning tree and draw its links */
+	qsort(links, nlinks, sizeof(*links), cut_link_cmp);
+	for (i = 0; i < nparts; i++)
+		root[i] = i;
+
+	for (i = 0; i < nlinks; i++) {
+		a = cut_part_root(root, links[i].part1);
+		b = cut_part_root(root, links[i].part2);
+		if (a == b)
+			continue;
+		root[a] = b;
+		cut_paint_segment(grid, links[i].p1, links[i].p2, width / 2);
+	}
+	ret = 1;
+ out:
+	free(part);
+	free(stack);
+	free(bstart);
+	free(bcell);
+	free(root);
+	free(links);
+	return ret;
+}
+
 /* Performs a morphological closing of the CUT_KEEP area of grid <grid> with a
  * disk of <radius> cells. This is the area left untouched by a ball of this
  * radius rolling all around it: gaps narrower than 2*radius are filled and
@@ -1993,6 +2239,7 @@ int cut_trace(struct cut_grid *grid, struct cut_loop **loops)
  * no artwork, and contains one loop per separate piece. The steps are:
  *   - mark the cells covering the artwork on a grid larger than the image;
  *   - keep the cells within the margin of the artwork (distance transform);
+ *   - join the separate parts with bridges;
  *   - round the area with a ball of the smoothing radius;
  *   - fill the holes so that only outer boundaries remain;
  *   - trace these boundaries.
@@ -2001,13 +2248,14 @@ int cut_trace(struct cut_grid *grid, struct cut_loop **loops)
 int cut_compute(const struct image *img, struct cut_loop **loops)
 {
 	struct cut_grid grid;
-	float res, pad, smooth;
+	float res, pad, smooth, bridge;
 	float margin, area;
 	int32_t cells, p;
 	int ret = 0;
 
 	*loops = NULL;
 	smooth = cutting.smooth >= 0 ? cutting.smooth : cutting.margin;
+	bridge = cutting.bridge >= 0 ? cutting.bridge : fmax(3.0, 2 * cutting.margin);
 
 	res = cutting.res;
 	if (res <= 0) {
@@ -2033,6 +2281,9 @@ int cut_compute(const struct image *img, struct cut_loop **loops)
 	for (p = 0; p < cells; p++)
 		if (grid.dist[p] <= margin * margin)
 			grid.map[p] |= CUT_KEEP;
+
+	if (bridge > 0 && !cut_bridge(&grid, bridge / res))
+		goto out;
 
 	if (smooth > 0 && !cut_close(&grid, smooth / res))
 		goto out;
@@ -2844,6 +3095,10 @@ int main(int argc, char **argv)
 
 		case OPT_CUT_SMOOTH:
 			cutting.smooth = arg_f;
+			break;
+
+		case OPT_CUT_BRIDGE:
+			cutting.bridge = arg_f;
 			break;
 
 		case OPT_CUT_THRESHOLD:
