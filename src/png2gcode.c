@@ -100,6 +100,7 @@ enum opt {
 	OPT_TEXT,
 	OPT_UBW,
 	OPT_CUT_MARGIN,
+	OPT_CUT_SMOOTH,
 	OPT_CUT_THRESHOLD,
 	OPT_CUT_RES,
 };
@@ -162,6 +163,7 @@ const struct option long_options[] = {
 	{"text",        required_argument, 0, OPT_TEXT         },
 	{"raster-ubw",  no_argument,       0, OPT_UBW          },
 	{"cut-margin",  required_argument, 0, OPT_CUT_MARGIN   },
+	{"cut-smooth",  required_argument, 0, OPT_CUT_SMOOTH   },
 	{"cut-threshold", required_argument, 0, OPT_CUT_THRESHOLD },
 	{"cut-res",     required_argument, 0, OPT_CUT_RES      },
 	{0,             0,                 0, 0                }
@@ -277,10 +279,12 @@ int raster_ubw = 0;
 /* settings of the cut line around the artwork */
 struct cutting {
 	float margin;    // min distance between the artwork and the cut line in mm
+	float smooth;    // rounding radius in mm, <0 = same as margin
 	float threshold; // pixels above this work value are artwork
 	float res;       // cut grid cell size in mm, <=0 = auto
 } cutting = {
 	.margin    = 2.0,
+	.smooth    = -1,
 	.threshold = 0,
 	.res       = 0,
 };
@@ -427,6 +431,7 @@ void usage(int code, const char *cmd)
 	    "  -P --passes  <value>         number of passes with previous parameters (def:1)\n"
 	    "Cut line settings (-M cut):\n"
 	    "     --cut-margin <mm>         min distance from the artwork to the cut line (def: 2.0)\n"
+	    "     --cut-smooth <mm>         rounding radius, fills gaps below twice it (def: margin)\n"
 	    "     --cut-threshold <value>   pixels above this intensity are artwork (def: 0.0)\n"
 	    "     --cut-res <mm>            cut computation resolution (def: min(pixel size,0.1))\n"
 	    "Material characteristics:\n"
@@ -1766,6 +1771,38 @@ void cut_neighbours(const struct cut_grid *grid, int32_t p, int32_t *nb)
 	nb[3] = y < grid->h - 1 ? p + grid->w : -1;
 }
 
+/* Performs a morphological closing of the CUT_KEEP area of grid <grid> with a
+ * disk of <radius> cells. This is the area left untouched by a ball of this
+ * radius rolling all around it: gaps narrower than 2*radius are filled and
+ * inner corners are rounded, while the area never shrinks. It is made of a
+ * dilation (cells within <radius> of the area) followed by an erosion (cells
+ * farther than <radius> from anything outside of the dilated area). Returns
+ * non-zero on success, 0 on failure.
+ */
+int cut_close(struct cut_grid *grid, float radius)
+{
+	int32_t cells = grid->w * grid->h;
+	float r2 = radius * radius;
+	int32_t p;
+
+	for (p = 0; p < cells; p++)
+		grid->dist[p] = (grid->map[p] & CUT_KEEP) ? 0 : CUT_INF;
+
+	if (!cut_edt(grid))
+		return 0;
+
+	for (p = 0; p < cells; p++)
+		grid->dist[p] = (grid->dist[p] <= r2) ? CUT_INF : 0;
+
+	if (!cut_edt(grid))
+		return 0;
+
+	for (p = 0; p < cells; p++)
+		if (grid->dist[p] > r2)
+			grid->map[p] |= CUT_KEEP;
+	return 1;
+}
+
 /* Sets CUT_OUTSIDE on all cells of grid <grid> without CUT_KEEP that can be
  * reached from the bottom left cell through other such cells using
  * 4-connectivity, then sets CUT_KEEP on all cells not having CUT_OUTSIDE, so
@@ -1956,6 +1993,7 @@ int cut_trace(struct cut_grid *grid, struct cut_loop **loops)
  * no artwork, and contains one loop per separate piece. The steps are:
  *   - mark the cells covering the artwork on a grid larger than the image;
  *   - keep the cells within the margin of the artwork (distance transform);
+ *   - round the area with a ball of the smoothing radius;
  *   - fill the holes so that only outer boundaries remain;
  *   - trace these boundaries.
  * Returns non-zero on success, 0 on failure.
@@ -1963,23 +2001,24 @@ int cut_trace(struct cut_grid *grid, struct cut_loop **loops)
 int cut_compute(const struct image *img, struct cut_loop **loops)
 {
 	struct cut_grid grid;
-	float res, pad;
+	float res, pad, smooth;
 	float margin, area;
 	int32_t cells, p;
 	int ret = 0;
 
 	*loops = NULL;
+	smooth = cutting.smooth >= 0 ? cutting.smooth : cutting.margin;
 
 	res = cutting.res;
 	if (res <= 0) {
 		res = fmin(fmin(img->mmw / img->w, img->mmh / img->h), 0.1);
-		area = (img->mmw + 2 * cutting.margin) * (img->mmh + 2 * cutting.margin);
+		area = (img->mmw + 2 * (cutting.margin + smooth)) * (img->mmh + 2 * (cutting.margin + smooth));
 		if (area / (res * res) > CUT_MAX_CELLS)
 			res = sqrt(area / CUT_MAX_CELLS);
 	}
 
-	/* the kept area must not reach the grid's border */
-	pad = cutting.margin + 2 * res;
+	/* the closing must not reach the grid's border */
+	pad = cutting.margin + smooth + 2 * res;
 	if (!cut_grid_init(&grid, img, res, pad, cutting.threshold))
 		goto out;
 
@@ -1994,6 +2033,9 @@ int cut_compute(const struct image *img, struct cut_loop **loops)
 	for (p = 0; p < cells; p++)
 		if (grid.dist[p] <= margin * margin)
 			grid.map[p] |= CUT_KEEP;
+
+	if (smooth > 0 && !cut_close(&grid, smooth / res))
+		goto out;
 
 	if (!cut_fill_outside(&grid))
 		goto out;
@@ -2798,6 +2840,10 @@ int main(int argc, char **argv)
 
 		case OPT_CUT_MARGIN:
 			cutting.margin = arg_f;
+			break;
+
+		case OPT_CUT_SMOOTH:
+			cutting.smooth = arg_f;
 			break;
 
 		case OPT_CUT_THRESHOLD:
