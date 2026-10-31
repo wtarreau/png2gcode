@@ -28,6 +28,8 @@
 
 /* flags describing each cell of the cut grid */
 #define CUT_ARTWORK  0x01 // the cell covers some artwork
+#define CUT_KEEP     0x02 // the cell belongs to the piece to cut
+#define CUT_SEEN     0x08 // the boundary between this cell and its right one was traced
 
 /* squared distance of cells that are not reachable from any feature cell */
 #define CUT_INF 1e20
@@ -272,6 +274,16 @@ struct cut_grid {
 	float y0;     // image-relative Y of the grid's bottom border in millimeters
 	uint8_t *map; // CUT_* flags for each cell
 	float *dist;  // squared distances for each cell, see cut_edt()
+};
+
+/* closed loop of points, with image-relative coordinates in millimeters. The
+ * last point connects back to the first one.
+ */
+struct cut_loop {
+	int32_t npts;          // number of points
+	int32_t alloc;         // number of allocated points
+	float *pts;            // <npts> (x,y) pairs
+	struct cut_loop *next; // next loop or NULL
 };
 
 
@@ -1710,6 +1722,133 @@ int cut_edt(struct cut_grid *grid)
 	free(v);
 	free(z);
 	return ret;
+}
+
+/* appends point (<x>,<y>) to loop <loop>. Returns non-zero on success, 0 on
+ * failure.
+ */
+int cut_loop_add(struct cut_loop *loop, float x, float y)
+{
+	float *pts;
+
+	if (loop->npts >= loop->alloc) {
+		loop->alloc = loop->alloc ? loop->alloc * 2 : 256;
+		pts = realloc(loop->pts, loop->alloc * 2 * sizeof(*pts));
+		if (!pts)
+			return 0;
+		loop->pts = pts;
+	}
+	loop->pts[2 * loop->npts] = x;
+	loop->pts[2 * loop->npts + 1] = y;
+	loop->npts++;
+	return 1;
+}
+
+/* releases all loops of list <loops> */
+void cut_loops_free(struct cut_loop *loops)
+{
+	struct cut_loop *next;
+
+	while (loops) {
+		next = loops->next;
+		free(loops->pts);
+		free(loops);
+		loops = next;
+	}
+}
+
+/* returns non-zero if cell (<x>,<y>) of grid <grid> has CUT_KEEP. Cells outside
+ * of the grid don't have it.
+ */
+int cut_keep(const struct cut_grid *grid, int32_t x, int32_t y)
+{
+	if (x < 0 || x >= grid->w || y < 0 || y >= grid->h)
+		return 0;
+	return !!(grid->map[y * grid->w + x] & CUT_KEEP);
+}
+
+/* Traces the boundaries of the CUT_KEEP area of grid <grid> using marching
+ * squares and prepends them as closed loops to list <loops>. The squares have
+ * the centers of 4 adjacent cells as corners, numbered counter-clockwise from
+ * the bottom left one, and edge k joins corners k and k+1. Each boundary point
+ * is the middle of an edge joining a kept corner and a non-kept one. A loop is
+ * followed square by square, always entering a square through an edge going
+ * from a kept corner to a non-kept one, and leaving it through the next edge
+ * going from a non-kept corner to a kept one. This keeps the piece on the
+ * left, so that the outer boundaries are counter-clockwise, and it joins kept
+ * cells that only touch by a corner, which means that the area outside of the
+ * piece is considered 4-connected. The grid's border cells must not have
+ * CUT_KEEP. Returns non-zero on success, 0 on failure.
+ */
+int cut_trace(struct cut_grid *grid, struct cut_loop **loops)
+{
+	static const int32_t cdx[4] = { 0, 1, 1, 0 };  // corners of a square
+	static const int32_t cdy[4] = { 0, 0, 1, 1 };
+	static const int32_t ndx[4] = { 0, 1, 0, -1 }; // square across each edge
+	static const int32_t ndy[4] = { -1, 0, 1, 0 };
+	struct cut_loop *loop;
+	int32_t x, y, sx, sy, k;
+	int32_t x0, y0, k0;
+	int32_t ax, ay, bx, by;
+	int32_t d, m;
+	int c[4];
+
+	for (y = 0; y < grid->h; y++) {
+		for (x = 0; x < grid->w - 1; x++) {
+			if (grid->map[y * grid->w + x] & CUT_SEEN)
+				continue;
+			if (cut_keep(grid, x, y) == cut_keep(grid, x + 1, y))
+				continue;
+
+			loop = calloc(1, sizeof(*loop));
+			if (!loop)
+				return 0;
+			loop->next = *loops;
+			*loops = loop;
+
+			/* square entered through the edge between these two cells */
+			if (cut_keep(grid, x, y)) {
+				sx = x;
+				sy = y;
+				k = 0;
+			} else {
+				sx = x;
+				sy = y - 1;
+				k = 2;
+			}
+
+			x0 = sx;
+			y0 = sy;
+			k0 = k;
+			do {
+				ax = sx + cdx[k];
+				ay = sy + cdy[k];
+				bx = sx + cdx[(k + 1) % 4];
+				by = sy + cdy[(k + 1) % 4];
+				if (ay == by)
+					grid->map[ay * grid->w + (ax < bx ? ax : bx)] |= CUT_SEEN;
+
+				if (!cut_loop_add(loop,
+						  grid->x0 + ((ax + bx) / 2.0 + 0.5) * grid->res,
+						  grid->y0 + ((ay + by) / 2.0 + 0.5) * grid->res))
+					return 0;
+
+				for (m = 0; m < 4; m++)
+					c[m] = cut_keep(grid, sx + cdx[m], sy + cdy[m]);
+
+				for (d = 1; d < 4; d++) {
+					m = (k + d) % 4;
+					if (!c[m] && c[(m + 1) % 4])
+						break;
+				}
+
+				sx += ndx[m];
+				sy += ndy[m];
+				k = (m + 2) % 4;
+			} while (sx != x0 || sy != y0 || k != k0);
+		}
+	}
+	return 1;
 }
 
 /* create a new g-code pass from previous known one */
