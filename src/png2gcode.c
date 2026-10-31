@@ -26,6 +26,9 @@
 #define TEXT_Y_MARGIN 2
 #define TEXT_X_MARGIN 1
 
+/* flags describing each cell of the cut grid */
+#define CUT_ARTWORK  0x01 // the cell covers some artwork
+
 struct image {
 	int32_t w;     // width in pixels
 	int32_t h;     // height in pixels
@@ -252,6 +255,19 @@ struct move_queue {
 
 /* raster preferences */
 int raster_ubw = 0;
+
+/* Grid used to compute the cut line. Cells are squares of <res> millimeters.
+ * Cell (x,y) covers image-relative coordinates from x0+x*res to x0+(x+1)*res
+ * and from y0+y*res to y0+(y+1)*res.
+ */
+struct cut_grid {
+	int32_t w;    // width in cells
+	int32_t h;    // height in cells
+	float res;    // cell size in millimeters
+	float x0;     // image-relative X of the grid's left border in millimeters
+	float y0;     // image-relative Y of the grid's bottom border in millimeters
+	uint8_t *map; // CUT_* flags for each cell
+};
 
 
 /* display the message and exit with the code */
@@ -1541,6 +1557,68 @@ int xfrm_apply(struct image *img, struct xfrm *xfrm)
 		free(freq);
 		freq = NULL;
 		xfrm = xfrm->next;
+	}
+	return 1;
+}
+
+/* releases the areas allocated for cut grid <grid> */
+void cut_grid_free(struct cut_grid *grid)
+{
+	free(grid->map);
+	memset(grid, 0, sizeof(*grid));
+}
+
+/* Initializes cut grid <grid> to cover image <img> plus <pad> millimeters on
+ * each side, using square cells of <res> millimeters, and sets CUT_ARTWORK on
+ * the cells covering any pixel whose work value is above <threshold>. Pixel
+ * (x,y) is burnt from X=x*pxw to X=(x+1)*pxw along the line Y=y*pxh, so it is
+ * considered as covering Y from (y-0.5)*pxh to (y+0.5)*pxh. All cells
+ * overlapping a pixel are marked, so the artwork is never under-estimated.
+ * Returns non-zero on success, 0 on failure. The grid must be released using
+ * cut_grid_free() in both cases.
+ */
+int cut_grid_init(struct cut_grid *grid, const struct image *img, float res, float pad, float threshold)
+{
+	float pxw = img->mmw / img->w;
+	float pxh = img->mmh / img->h;
+	int32_t cx0, cx1, cy0, cy1;
+	int32_t cx, cy;
+	int32_t x, y;
+	double cells;
+
+	memset(grid, 0, sizeof(*grid));
+	grid->res = res;
+	grid->x0  = -pad;
+	grid->y0  = -0.5 * pxh - pad;
+
+	cells = ceil((img->mmw + 2 * pad) / res) * ceil((img->mmh + 2 * pad) / res);
+	if (cells > INT32_MAX / 2)
+		return 0;
+
+	grid->w = ceil((img->mmw + 2 * pad) / res);
+	grid->h = ceil((img->mmh + 2 * pad) / res);
+
+	grid->map = calloc((size_t)grid->w * grid->h, sizeof(*grid->map));
+	if (!grid->map)
+		return 0;
+
+	for (y = 0; y < img->h; y++) {
+		for (x = 0; x < img->w; x++) {
+			if (img->work[y * img->w + x] <= threshold)
+				continue;
+
+			/* range of cells overlapping this pixel, tolerating
+			 * rounding errors on cell borders.
+			 */
+			cx0 = floor((x * pxw - grid->x0) / res + 0.001);
+			cx1 = ceil(((x + 1) * pxw - grid->x0) / res - 0.001);
+			cy0 = floor(((y - 0.5) * pxh - grid->y0) / res + 0.001);
+			cy1 = ceil(((y + 0.5) * pxh - grid->y0) / res - 0.001);
+
+			for (cy = cy0; cy < cy1; cy++)
+				for (cx = cx0; cx < cx1; cx++)
+					grid->map[cy * grid->w + cx] |= CUT_ARTWORK;
+		}
 	}
 	return 1;
 }
