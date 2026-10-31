@@ -309,12 +309,16 @@ struct cut_grid {
 };
 
 /* closed loop of points, with image-relative coordinates in millimeters. The
- * last point connects back to the first one.
+ * last point connects back to the first one. Each point starts a segment to
+ * the next one, which is straight unless <arc> says otherwise. An arc from a
+ * point to itself is a full circle.
  */
 struct cut_loop {
 	int32_t npts;          // number of points
 	int32_t alloc;         // number of allocated points
 	float *pts;            // <npts> (x,y) pairs
+	uint8_t *arc;          // NULL, or for each point: 0 = straight, 2 = clockwise arc (G2), 3 = counter-clockwise arc (G3)
+	float *ctr;            // NULL, or for each point: (x,y) center of the arc starting there
 	struct cut_loop *next; // next loop or NULL
 };
 
@@ -2165,26 +2169,80 @@ void cut_loops_free(struct cut_loop *loops)
 	while (loops) {
 		next = loops->next;
 		free(loops->pts);
+		free(loops->arc);
+		free(loops->ctr);
 		free(loops);
 		loops = next;
 	}
 }
 
+/* returns the signed angle in radians swept by the segment starting at point
+ * <i> of loop <loop>, positive when counter-clockwise, or 0 if the segment is
+ * straight.
+ */
+double cut_seg_sweep(const struct cut_loop *loop, int32_t i)
+{
+	int32_t j = (i + 1) % loop->npts;
+	double sweep;
+
+	if (!loop->arc || !loop->arc[i])
+		return 0;
+
+	if (i == j)
+		return loop->arc[i] == 3 ? 2 * M_PI : -2 * M_PI;
+
+	sweep = atan2(loop->pts[2 * j + 1] - loop->ctr[2 * i + 1], loop->pts[2 * j] - loop->ctr[2 * i]) -
+		atan2(loop->pts[2 * i + 1] - loop->ctr[2 * i + 1], loop->pts[2 * i] - loop->ctr[2 * i]);
+
+	if (loop->arc[i] == 3 && sweep < 0)
+		sweep += 2 * M_PI;
+	else if (loop->arc[i] == 2 && sweep > 0)
+		sweep -= 2 * M_PI;
+	return sweep;
+}
+
+/* computes into <x>,<y> the position at fraction <t> (0 to 1) of the segment
+ * starting at point <i> of loop <loop>, straight or arc.
+ */
+void cut_seg_point(const struct cut_loop *loop, int32_t i, double t, float *x, float *y)
+{
+	int32_t j = (i + 1) % loop->npts;
+	double r, a;
+
+	if (!loop->arc || !loop->arc[i]) {
+		*x = loop->pts[2 * i] + (loop->pts[2 * j] - loop->pts[2 * i]) * t;
+		*y = loop->pts[2 * i + 1] + (loop->pts[2 * j + 1] - loop->pts[2 * i + 1]) * t;
+		return;
+	}
+
+	r = hypot(loop->pts[2 * i] - loop->ctr[2 * i], loop->pts[2 * i + 1] - loop->ctr[2 * i + 1]);
+	a = atan2(loop->pts[2 * i + 1] - loop->ctr[2 * i + 1], loop->pts[2 * i] - loop->ctr[2 * i]);
+	a += cut_seg_sweep(loop, i) * t;
+	*x = loop->ctr[2 * i] + r * cos(a);
+	*y = loop->ctr[2 * i + 1] + r * sin(a);
+}
+
 /* computes the extent of the non-empty list of loops <loops> into <minx>,
- * <maxx>, <miny> and <maxy>.
+ * <maxx>, <miny> and <maxy>. Arcs are sampled every few degrees, which is
+ * accurate enough for reporting and drawing purposes.
  */
 void cut_loops_extent(const struct cut_loop *loops, float *minx, float *maxx, float *miny, float *maxy)
 {
-	int32_t i;
+	int32_t i, k, steps;
+	float x, y;
 
 	*minx = *maxx = loops->pts[0];
 	*miny = *maxy = loops->pts[1];
 	for (; loops; loops = loops->next) {
 		for (i = 0; i < loops->npts; i++) {
-			*minx = fmin(*minx, loops->pts[2 * i]);
-			*maxx = fmax(*maxx, loops->pts[2 * i]);
-			*miny = fmin(*miny, loops->pts[2 * i + 1]);
-			*maxy = fmax(*maxy, loops->pts[2 * i + 1]);
+			steps = loops->arc && loops->arc[i] ? 128 : 1;
+			for (k = 0; k < steps; k++) {
+				cut_seg_point(loops, i, (double)k / steps, &x, &y);
+				*minx = fmin(*minx, x);
+				*maxx = fmax(*maxx, x);
+				*miny = fmin(*miny, y);
+				*maxy = fmax(*maxy, y);
+			}
 		}
 	}
 }
@@ -2374,8 +2432,9 @@ int draw_cut_loops(struct image *img, const struct cut_loop *loops)
 	float pxh = img->mmh / img->h;
 	float minx, maxx, miny, maxy;
 	float u0, v0, u1, v1;
+	float x0, y0, x1, y1;
 	int32_t l, r, t, b;
-	int32_t i, s, steps;
+	int32_t i, k, s, steps, parts;
 	int32_t x, y;
 
 	if (!loops)
@@ -2395,21 +2454,32 @@ int draw_cut_loops(struct image *img, const struct cut_loop *loops)
 	if (!gray_to_rgba(img))
 		return 0;
 
+	/* arcs are drawn as series of short lines of about one pixel */
 	for (loop = loops; loop; loop = loop->next) {
 		for (i = 0; i < loop->npts; i++) {
-			u0 = loop->pts[2 * i] / pxw + l;
-			v0 = loop->pts[2 * i + 1] / pxh + 0.5 + b;
-			u1 = loop->pts[2 * ((i + 1) % loop->npts)] / pxw + l;
-			v1 = loop->pts[2 * ((i + 1) % loop->npts) + 1] / pxh + 0.5 + b;
-			steps = ceil(fmax(fabs(u1 - u0), fabs(v1 - v0))) + 1;
-			for (s = 0; s <= steps; s++) {
-				x = floor(u0 + (u1 - u0) * s / steps);
-				y = floor(v0 + (v1 - v0) * s / steps);
-				if (x < 0 || x >= img->w || y < 0 || y >= img->h)
-					continue;
-				img->rgba[(y * img->w + x) * 4 + 0] = 255;
-				img->rgba[(y * img->w + x) * 4 + 1] = 0;
-				img->rgba[(y * img->w + x) * 4 + 2] = 0;
+			parts = 1;
+			if (loop->arc && loop->arc[i])
+				parts = ceil(fabs(cut_seg_sweep(loop, i)) *
+					     hypot(loop->pts[2 * i] - loop->ctr[2 * i], loop->pts[2 * i + 1] - loop->ctr[2 * i + 1]) /
+					     fmin(pxw, pxh)) + 1;
+
+			for (k = 0; k < parts; k++) {
+				cut_seg_point(loop, i, (double)k / parts, &x0, &y0);
+				cut_seg_point(loop, i, (double)(k + 1) / parts, &x1, &y1);
+				u0 = x0 / pxw + l;
+				v0 = y0 / pxh + 0.5 + b;
+				u1 = x1 / pxw + l;
+				v1 = y1 / pxh + 0.5 + b;
+				steps = ceil(fmax(fabs(u1 - u0), fabs(v1 - v0))) + 1;
+				for (s = 0; s <= steps; s++) {
+					x = floor(u0 + (u1 - u0) * s / steps);
+					y = floor(v0 + (v1 - v0) * s / steps);
+					if (x < 0 || x >= img->w || y < 0 || y >= img->h)
+						continue;
+					img->rgba[(y * img->w + x) * 4 + 0] = 255;
+					img->rgba[(y * img->w + x) * 4 + 1] = 0;
+					img->rgba[(y * img->w + x) * 4 + 2] = 0;
+				}
 			}
 		}
 	}
@@ -2754,12 +2824,18 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 			}
 			else if (pass->mode == PASS_MODE_CUT) {
 				/* each loop is cut separately, starting and ending at
-				 * its first point.
+				 * its first point. The motion mode (G1/G2/G3) is only
+				 * repeated when it changes. Arc centers are given
+				 * relative to the arc's start (I/J), computed from the
+				 * rounded positions so that the start and end radii
+				 * remain identical.
 				 */
 				if (!cut_loops)
 					fprintf(file, "; empty image\n");
 
 				for (cut = cut_loops; cut; cut = cut->next) {
+					int g, prev_g = 1;
+
 					fprintf(file, "G0 X%.7g Y%.7g\n%s S%d\nG1 F%d\n",
 						f4(img->orgx + cut->pts[0]),
 						f4(img->orgy + cut->pts[1]),
@@ -2767,10 +2843,24 @@ int emit_gcode(const char *out, struct image *img, const struct pass *passes, in
 						base_spindle,
 						base_feed);
 
-					for (i = 1; i <= cut->npts; i++)
-						fprintf(file, "X%.7g Y%.7g\n",
-							f4(img->orgx + cut->pts[2 * (i % cut->npts)]),
-							f4(img->orgy + cut->pts[2 * (i % cut->npts) + 1]));
+					for (i = 0; i < cut->npts; i++) {
+						int j = (i + 1) % cut->npts;
+
+						g = (cut->arc && cut->arc[i]) ? cut->arc[i] : 1;
+						if (g != prev_g)
+							fprintf(file, "G%d ", g);
+						prev_g = g;
+
+						fprintf(file, "X%.7g Y%.7g",
+							f4(img->orgx + cut->pts[2 * j]),
+							f4(img->orgy + cut->pts[2 * j + 1]));
+
+						if (g != 1)
+							fprintf(file, " I%.7g J%.7g",
+								f4(f4(img->orgx + cut->ctr[2 * i]) - f4(img->orgx + cut->pts[2 * i])),
+								f4(f4(img->orgy + cut->ctr[2 * i + 1]) - f4(img->orgy + cut->pts[2 * i + 1])));
+						fprintf(file, "\n");
+					}
 
 					fprintf(file, "M5 S0\n");
 				}
